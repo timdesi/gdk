@@ -393,7 +393,6 @@ namespace sdk {
         , m_system_message_ack_id(0)
         , m_watch_only(true)
         , m_is_locked(false)
-        , m_tx_last_notification(std::chrono::system_clock::now())
         , m_multi_call_category(0)
         , m_cache(m_net_params, net_params.at("name"))
         , m_user_agent(std::string(GDK_COMMIT) + " " + net_params.value("user_agent", ""))
@@ -1412,31 +1411,6 @@ namespace sdk {
             using namespace std::chrono_literals;
 
             GDK_RUNTIME_ASSERT(locker.owns_lock());
-
-            const auto now = std::chrono::system_clock::now();
-            if (now < m_tx_last_notification || now - m_tx_last_notification > 60s) {
-                // Time has adjusted, or more than 60s since last notification,
-                // clear any cached notifications to deliver new ones even if
-                // duplicates
-                m_tx_notifications.clear();
-            }
-
-            m_tx_last_notification = now;
-
-            const auto json_str = details.dump();
-            if (std::find(m_tx_notifications.begin(), m_tx_notifications.end(), json_str) != m_tx_notifications.end()) {
-                GDK_LOG_SEV(log_level::debug) << "eliding notification:" << json_str;
-                return; // Elide duplicate notifications sent by the server
-            }
-
-            m_tx_notifications.emplace_back(json_str); // Record this notification as delivered
-
-            if (m_tx_notifications.size() > 8u) {
-                // Limit the size of notifications to elide. It is extremely unlikely
-                // for unique transactions to be notified fast enough for this to occur,
-                // but we strongly bound the vector size just in case.
-                m_tx_notifications.erase(m_tx_notifications.begin()); // pop the oldest
-            }
 
             for (auto subaccount : subaccounts) {
                 const auto p = m_subaccounts.find(subaccount);

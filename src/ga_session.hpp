@@ -532,8 +532,6 @@ namespace sdk {
         bool m_watch_only;
         bool m_is_locked;
         logging_levels m_log_level;
-        std::vector<std::string> m_tx_notifications;
-        std::chrono::system_clock::time_point m_tx_last_notification;
 
         uint32_t m_multi_call_category;
         tx_list_caches m_tx_list_caches;
