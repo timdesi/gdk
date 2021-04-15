@@ -409,7 +409,8 @@ namespace sdk {
 
         // Transactions with outputs below the dust threshold (except OP_RETURN)
         // are not relayed by network nodes
-        if (!result.value("send_all", false) && satoshi.value() < session.get_dust_threshold()) {
+        const bool greedy = addressee.find("greedy") != addressee.end();
+        if (!result.value("send_all", false) && !greedy && satoshi.value() < session.get_dust_threshold()) {
             set_tx_error(result, res::id_invalid_amount);
         }
 
@@ -418,6 +419,17 @@ namespace sdk {
 
         return add_tx_output(
             net_params, result, tx, address, satoshi.value(), asset_id_from_json(net_params, addressee));
+    }
+
+    void set_tx_output_value(const network_parameters& net_params, wally_tx_ptr& tx, uint32_t index,
+        const std::string& asset_tag, amount::value_type satoshi)
+    {
+        const bool is_liquid = net_params.is_liquid();
+        if (is_liquid) {
+            set_tx_output_commitment(tx, index, asset_tag, satoshi);
+        } else {
+            tx->outputs[index].satoshi = satoshi;
+        }
     }
 
     void update_tx_size_info(const network_parameters& net_params, const wally_tx_ptr& tx, nlohmann::json& result)

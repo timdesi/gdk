@@ -699,11 +699,7 @@ namespace sdk {
                             // so compute what we can send (everything minus the
                             // fee) and exit the loop
                             required_total = available_total - fee;
-                            if (is_liquid) {
-                                set_tx_output_commitment(tx, 0, asset_id, required_total.value());
-                            } else {
-                                tx->outputs[0].satoshi = required_total.value();
-                            }
+                            set_tx_output_value(net_params, tx, 0, asset_id, required_total.value());
                             if (num_addressees == 1u) {
                                 addressees_p->at(0)["satoshi"] = required_total.value();
                             }
@@ -756,6 +752,36 @@ namespace sdk {
                     // better UTXO selection algorithm should prevent this rare case.
                     if (have_change_output) {
                         force_add_utxo = true;
+                        continue;
+                    }
+
+                    // There is some change. Before allocating it to a change output,
+                    // look for 'greedy' addressees and instead allocate it to them
+                    amount::value_type change_amount = (total - required_total - fee).value();
+                    bool have_greedy_output = false;
+                    if (num_addressees) {
+                        int addressee_index = 0;
+                        for (auto& addressee : *addressees_p) {
+                            const auto addressee_asset_id = asset_id_from_json(net_params, addressee);
+                            if (addressee_asset_id == asset_id) {
+                                if (addressee.find("greedy") != addressee.end()) {
+                                    // There is an assumption that the tx outputs are indexed so they match
+                                    // addressees, which is very weakly enforced but needs to be true otherwise
+                                    // other things (liquid blinding) breaks.
+                                    // Note that as currently coded if there are multiple greedy addressees
+                                    // the last one will steal all the coins. Maybe this should be an error.
+                                    set_tx_output_value(net_params, tx, addressee_index, asset_id, change_amount);
+                                    addressee["satoshi"] = change_amount;
+                                    have_greedy_output = true;
+                                    required_total += change_amount;
+                                }
+                            }
+                            ++addressee_index;
+                        }
+                    }
+
+                    if (have_greedy_output) {
+                        // No need for change with greedy output
                         continue;
                     }
 
