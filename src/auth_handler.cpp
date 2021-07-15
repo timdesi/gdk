@@ -209,7 +209,10 @@ namespace sdk {
 
     std::shared_ptr<signer> auth_handler_impl::get_signer() const { return m_signer; }
 
-    bool auth_handler_impl::has_retry_counter() const { return m_method != "gauth" && m_method != "telegram"; }
+    bool auth_handler_impl::has_retry_counter() const
+    {
+        return m_method != "gauth" && m_method != "telegram" && m_method != "u2f";
+    }
 
     nlohmann::json auth_handler_impl::get_status() const
     {
