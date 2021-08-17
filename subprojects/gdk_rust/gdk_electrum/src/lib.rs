@@ -63,6 +63,7 @@ use rand::thread_rng;
 use rand::Rng;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
+use std::iter::FromIterator;
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread::JoinHandle;
 
@@ -149,11 +150,9 @@ fn notify_settings(notif: NativeNotif, settings: &Settings) {
     notify(notif, data);
 }
 
-fn notify_updated_txs(notif: NativeNotif, account_num: u32) {
-    // This is used as a signal to trigger syncing via get_transactions, the transaction
-    // list contained here is ignored and can be just a mock.
-    let mockup_json = json!({"event":"transaction","transaction":{"subaccounts":[account_num]}});
-    notify(notif, mockup_json);
+fn notify_updated_txs(notif: NativeNotif, txid: BETxid, accounts: HashSet<u32>) {
+    let json = json!({"event":"transaction","transaction":{"txhash":txid.to_hex(),"subaccounts":Vec::from_iter(accounts)}});
+    notify(notif, json);
 }
 
 fn determine_electrum_url(
@@ -607,10 +606,15 @@ impl Session<Error> for ElectrumSession {
             loop {
                 match syncer_url.build_client(proxy.as_deref()) {
                     Ok(client) => match syncer.sync(&client) {
-                        Ok(updated_accounts) => {
-                            for account_num in updated_accounts {
+                        Ok(updated_txs) => {
+                            for (txid, accounts) in updated_txs.iter() {
                                 info!("there are new transactions");
-                                notify_updated_txs(notify_txs.clone(), account_num);
+                                // TODO: limit the number of notifications
+                                notify_updated_txs(
+                                    notify_txs.clone(),
+                                    txid.clone(),
+                                    accounts.clone(),
+                                );
                             }
                         }
                         Err(e) => warn!("Error during sync, {:?}", e),
@@ -1125,12 +1129,12 @@ struct DownloadTxResult {
 
 impl Syncer {
     /// Sync the wallet, return the set of updated accounts
-    pub fn sync(&self, client: &Client) -> Result<HashSet<u32>, Error> {
+    pub fn sync(&self, client: &Client) -> Result<HashMap<BETxid, HashSet<u32>>, Error> {
         debug!("start sync");
         let start = Instant::now();
 
         let wallet = self.wallet.read().unwrap();
-        let mut updated_accounts = HashSet::new();
+        let mut updated_txs: HashMap<BETxid, HashSet<u32>> = HashMap::new();
 
         for account in wallet.iter_accounts() {
             let mut history_txs_id = HashSet::<BETxid>::new();
@@ -1240,7 +1244,15 @@ impl Syncer {
                 store_write.flush()?;
                 drop(store_write);
 
-                updated_accounts.insert(account.num());
+                for tx in new_txs.txs.iter() {
+                    if let Some(accounts) = updated_txs.get_mut(&tx.0) {
+                        accounts.insert(account.num());
+                    } else {
+                        let mut accounts = HashSet::new();
+                        accounts.insert(account.num());
+                        updated_txs.insert(tx.0, accounts);
+                    }
+                }
 
                 // the transactions are first indexed into the db and then verified so that all the prevouts
                 // and scripts are available for querying. invalid transactions will be removed by verify_own_txs.
@@ -1257,7 +1269,7 @@ impl Syncer {
             );
         }
 
-        Ok(updated_accounts)
+        Ok(updated_txs)
     }
 
     fn download_headers(
