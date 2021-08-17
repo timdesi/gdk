@@ -516,8 +516,10 @@ impl Session<Error> for ElectrumSession {
                         if round % CROSS_VALIDATION_RATE == 0 {
                             let status_changed = headers.cross_validate();
                             if status_changed {
-                                // TODO account number
-                                notify_updated_txs(notify_headers.clone(), 0u32.into());
+                                // TODO: improve block notification
+                                if let Ok(store_read) = headers.store.read() {
+                                    notify_block(notify_headers.clone(), store_read.cache.tip.0);
+                                }
                             }
                         }
 
