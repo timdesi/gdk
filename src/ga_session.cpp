@@ -2792,6 +2792,10 @@ namespace sdk {
                 tx_details["can_cpfp"] = false;
             }
 
+            tx_details["addressees"] = addressees;
+            tx_details["user_signed"] = true;
+            tx_details["server_signed"] = true;
+
             if (m_net_params.spv_enabled()) {
                 tx_details["spv_verified"] = "in_progress";
                 if (!datadir.empty() && is_cached) {
@@ -2827,9 +2831,6 @@ namespace sdk {
             } else {
                 tx_details["spv_verified"] = "disabled";
             }
-            tx_details["addressees"] = addressees;
-            tx_details["user_signed"] = true;
-            tx_details["server_signed"] = true;
         }
         if (updated_blinding_cache) {
             locker_t locker(m_mutex);
