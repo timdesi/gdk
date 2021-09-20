@@ -677,5 +677,12 @@ namespace sdk {
     }
     std::vector<uint32_t> network_parameters::csv_buckets() const { return m_details.at("csv_buckets"); }
     uint32_t network_parameters::cert_expiry_threshold() const { return m_details.at("cert_expiry_threshold"); }
+    uint32_t network_parameters::get_max_reorg_blocks() const
+    {
+        if (is_liquid()) {
+            return 2u;
+        }
+        return is_main_net() ? 128 : 1024;
+    }
 } // namespace sdk
 } // namespace ga
