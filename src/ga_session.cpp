@@ -154,8 +154,8 @@ namespace sdk {
         // it so we don't process it incorrectly (forward compatibility).
         // Fields under the TXN_OPTIONAL key are exempt from this check.
         static const std::string TXN_OPTIONAL("optional");
-        static const std::array<const std::string, 4> TX_NTFY_FIELDS
-            = { "subaccounts", "txhash", "value", TXN_OPTIONAL };
+        static const std::array<const std::string, 5> TX_NTFY_FIELDS
+            = { "subaccounts", "txhash", "value", "event", TXN_OPTIONAL };
 
         // TODO: too slow. lacks validation.
         static std::array<unsigned char, SHA256_LEN> uint256_to_base256(const std::string& input)
