@@ -22,8 +22,9 @@ use gdk_common::be::{
 };
 use gdk_common::error::fn_err;
 use gdk_common::model::{
-    AccountInfo, AddressAmount, AddressPointer, Balances, CreateTransaction, GetTransactionsOpt,
-    SPVVerifyResult, TransactionMeta, UpdateAccountOpt, UtxoStrategy,
+    AccountInfo, AddressAmount, AddressPointer, Balances, CreatePset, CreateTransaction,
+    GetTransactionsOpt, PsetMeta, SPVVerifyResult, SignPset, SignedPsetMeta, SwapInput,
+    TransactionMeta, UpdateAccountOpt, UtxoStrategy,
 };
 use gdk_common::scripts::{p2pkh_script, p2shwpkh_script_sig, ScriptType};
 use gdk_common::wally::{
@@ -529,6 +530,20 @@ impl Account {
         }
 
         Ok(betx)
+    }
+
+    pub fn create_pset(&self, request: &CreatePset) -> Result<PsetMeta, Error> {
+        if request.subaccount != self.account_num {
+            return Err(Error::InvalidSubaccount(request.subaccount));
+        }
+        create_pset(self, request)
+    }
+
+    pub fn sign_pset(&self, request: &SignPset) -> Result<SignedPsetMeta, Error> {
+        if request.subaccount != self.account_num {
+            return Err(Error::InvalidSubaccount(request.subaccount));
+        }
+        sign_pset(self, request)
     }
 
     pub fn get_script_batch(&self, is_change: bool, batch: u32) -> Result<ScriptBatch, Error> {
@@ -1382,6 +1397,233 @@ fn blind_tx(account: &Account, tx: &mut elements::Transaction) -> Result<(), Err
         }
     }
     Ok(())
+}
+
+fn verify_pset_request_amounts(
+    account: &Account,
+    send_asset: &str,
+    send_amount: u64,
+    recv_asset: &str,
+    recv_amount: u64,
+) -> Result<(elements::AssetId, elements::AssetId), Error> {
+    if !account.network.liquid {
+        return Err(Error::Generic("not implemented".into()));
+    }
+    let send_asset = elements::AssetId::from_str(&send_asset)
+        .map_err(|_| Error::Generic("invalid send_asset value".into()))?;
+    let recv_asset = elements::AssetId::from_str(&recv_asset)
+        .map_err(|_| Error::Generic("invalid recv_asset value".into()))?;
+    if send_asset == recv_asset {
+        return Err(Error::Generic("assets must be different".into()));
+    }
+    if send_amount == 0 || recv_amount == 0 {
+        return Err(Error::Generic("invalid amount, must be positive".into()));
+    }
+    Ok((send_asset, recv_asset))
+}
+
+pub fn create_pset(account: &Account, request: &CreatePset) -> Result<PsetMeta, Error> {
+    let (send_asset, _recv_asset) = verify_pset_request_amounts(
+        account,
+        &request.send_asset,
+        request.send_amount,
+        &request.recv_asset,
+        request.recv_amount,
+    )?;
+
+    let utxos = account.utxos(0, true)?;
+    let mut asset_utxos: Vec<&(BEOutPoint, UTXOInfo)> =
+        utxos.iter().filter(|(_, i)| i.asset_id() == Some(send_asset)).collect();
+    asset_utxos.sort_by(|a, b| (a.1).value.cmp(&(b.1).value));
+
+    let store_read = account.store.read()?;
+    let acc_store = store_read.account_cache(account.num())?;
+    let mut selected = 0;
+    let mut inputs = Vec::new();
+    while selected < request.send_amount && !asset_utxos.is_empty() {
+        let (out_point, utxo_info) = asset_utxos.pop().unwrap();
+        selected += utxo_info.value;
+
+        let out_point = match out_point {
+            BEOutPoint::Elements(v) => v,
+            BEOutPoint::Bitcoin(_) => unreachable!("unexpected outpoint"),
+        };
+        let unblinded = acc_store
+            .unblinded
+            .get(&out_point)
+            .ok_or_else(|| Error::Generic("can't find unblinded output".into()))?;
+        let mut abf = unblinded.abf;
+        let mut vbf = unblinded.vbf;
+        abf.reverse();
+        vbf.reverse();
+
+        inputs.push(SwapInput {
+            txid: out_point.txid.to_string(),
+            vout: out_point.vout,
+            asset: request.send_asset.clone(),
+            value: utxo_info.value,
+            asset_bf: hex::encode(&abf),
+            value_bf: hex::encode(&vbf),
+        });
+    }
+    if selected < request.send_amount {
+        return Err(Error::InsufficientFunds);
+    }
+
+    // Drop mutex locks to prevent deadlock later
+    drop(acc_store);
+    drop(store_read);
+
+    let recv_addr = account.get_next_address()?.address;
+    let change_addr = account.get_next_address()?.address;
+
+    Ok(PsetMeta {
+        inputs,
+        recv_addr,
+        change_addr,
+    })
+}
+
+fn verify_recv_output(
+    account: &Account,
+    output: &elements_pset::pset::Output,
+    expected_asset: &elements::AssetId,
+    expected_value: u64,
+) -> Result<(), Error> {
+    let store_read = account.store.read().unwrap();
+    let acc_store = store_read.account_cache(account.account_num).unwrap();
+    let script = elements::Script::from(output.script_pubkey.to_bytes());
+    if acc_store.paths.get(&BEScript::Elements(script.clone())).is_none() {
+        return Err(Error::Generic("unknown output script".into()));
+    }
+
+    let blinding_key = gdk_common::wally::asset_blinding_key_to_ec_private_key(
+        account.master_blinding.as_ref().unwrap(),
+        &script,
+    );
+    let rangeproof = output
+        .value_rangeproof
+        .as_ref()
+        .ok_or_else(|| Error::Generic("rangeproof is not set".to_owned()))?
+        .serialize();
+    let value_commitment = elements_pset::encode::serialize(&output.amount);
+    let asset_commitment = elements_pset::encode::serialize(&output.asset);
+    let sender_pk = elements::secp256k1::PublicKey::from_slice(
+        &output
+            .ecdh_pubkey
+            .as_ref()
+            .ok_or_else(|| Error::Generic("ecdh_pubkey is not set".to_owned()))?
+            .to_bytes(),
+    )
+    .unwrap();
+    let (unblinded_asset, _abf, _vbf, unblinded_value) = gdk_common::wally::asset_unblind(
+        sender_pk,
+        blinding_key,
+        rangeproof,
+        value_commitment,
+        script,
+        asset_commitment,
+    )
+    .map_err(|_| Error::Generic("unblinding output failed".to_owned()))?;
+
+    if *expected_asset != unblinded_asset {
+        return Err(Error::Generic("unexpected asset".to_owned()));
+    }
+    if expected_value != unblinded_value {
+        return Err(Error::Generic("unexpected value".to_owned()));
+    }
+    Ok(())
+}
+
+pub fn sign_pset(account: &Account, request: &SignPset) -> Result<SignedPsetMeta, Error> {
+    let (send_asset, recv_asset) = verify_pset_request_amounts(
+        account,
+        &request.send_asset,
+        request.send_amount,
+        &request.recv_asset,
+        request.recv_amount,
+    )?;
+
+    let pset = base64::decode(&request.pset)
+        .map_err(|_| Error::Generic("invalid base64 encoding".into()))?;
+    let mut pset = elements_pset::encode::deserialize::<
+        elements_pset::pset::PartiallySignedTransaction,
+    >(&pset)
+    .map_err(|e| Error::Generic(format!("invalid PSET: {}", e)))?;
+
+    let tx = pset
+        .extract_tx()
+        .map_err(|e| Error::Generic(format!("extracting transaction failed: {}", e)))?;
+    let tx = elements::encode::deserialize(&elements_pset::encode::serialize(&tx))?;
+
+    pset.outputs
+        .iter()
+        .find(|output| {
+            verify_recv_output(account, output, &recv_asset, request.recv_amount).is_ok()
+        })
+        .ok_or_else(|| Error::Generic("no receive output found".to_owned()))?;
+
+    let utxos = account.utxos(0, true)?;
+    let asset_utxos: std::collections::HashMap<BEOutPoint, UTXOInfo> =
+        utxos.into_iter().filter(|(_, i)| i.asset_id() == Some(send_asset)).collect();
+
+    let store_read = account.store.read()?;
+    let acc_store = store_read.account_cache(account.num())?;
+
+    let mut inputs_amount = 0;
+    for (index, input) in pset.inputs.iter_mut().enumerate() {
+        let out_point = elements::OutPoint {
+            txid: elements::Txid::from_str(&input.previous_txid.to_string()).unwrap(),
+            vout: input.previous_output_index,
+        };
+        let unblinded = acc_store.unblinded.get(&out_point);
+        if let Some(unblinded) = unblinded {
+            if unblinded.asset != send_asset {
+                return Err(Error::Generic("unexpected input asset_id".into()));
+            }
+            inputs_amount += unblinded.value;
+            let txid = elements::Txid::from_str(&input.previous_txid.to_string()).unwrap();
+            let out_point = BEOutPoint::Elements(out_point);
+            let utxo = asset_utxos
+                .get(&out_point)
+                .ok_or_else(|| Error::Generic("can't find UTXO".into()))?;
+
+            let prev_tx = acc_store.get_liquid_tx(&txid)?;
+            let out = &prev_tx.output[input.previous_output_index as usize];
+            let (script_sig, witness) = internal_sign_elements(
+                &tx,
+                index,
+                &account.xprv,
+                &utxo.path,
+                out.value,
+                account.script_type,
+            );
+            let script_sig =
+                elements_pset::encode::deserialize(&elements::encode::serialize(&script_sig))
+                    .unwrap();
+            input.final_script_sig = Some(script_sig);
+            input.final_script_witness = Some(witness);
+        }
+    }
+    if inputs_amount < request.send_amount {
+        return Err(Error::Generic(format!(
+            "inputs amount ({}) is less than send amount ({})",
+            inputs_amount, request.send_amount
+        )));
+    }
+
+    let change_amount = inputs_amount - request.send_amount;
+    if change_amount > 0 {
+        pset.outputs
+            .iter_mut()
+            .find(|output| verify_recv_output(account, output, &send_asset, change_amount).is_ok())
+            .ok_or_else(|| Error::Generic("no change output found".to_owned()))?;
+    }
+
+    let pset = elements_pset::encode::serialize(&pset);
+    Ok(SignedPsetMeta {
+        pset: base64::encode(&pset),
+    })
 }
 
 #[cfg(test)]
