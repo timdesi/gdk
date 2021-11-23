@@ -359,7 +359,8 @@ pub struct TxListItem {
     pub memo: String,
     pub txhash: String,
     pub transaction: String,
-    #[serde(serialize_with = "serialize_tx_balances")]
+    // Disable to be able detect swap transactions
+    //#[serde(serialize_with = "serialize_tx_balances")]
     pub satoshi: Balances,
     pub rbf_optin: bool,
     pub can_cpfp: bool,
