@@ -1,5 +1,7 @@
 #include "ga_wally.hpp"
 #include "boost_wrapper.hpp"
+#include "exception.hpp"
+#include "ga_strings.hpp"
 #include "memory.hpp"
 #include "utils.hpp"
 
@@ -283,12 +285,13 @@ namespace sdk {
         return ret;
     }
 
-    std::vector<unsigned char> witness_program_from_bytes(byte_span_t script, uint32_t flags)
+    std::vector<unsigned char> witness_program_from_bytes(byte_span_t script, uint32_t witness_ver, uint32_t flags)
     {
+        GDK_RUNTIME_ASSERT(witness_ver == 0); // Only segwit v0 is supported
         size_t written;
         std::vector<unsigned char> ret(WALLY_WITNESSSCRIPT_MAX_LEN);
-        GDK_VERIFY(
-            wally_witness_program_from_bytes(script.data(), script.size(), flags, &ret[0], ret.size(), &written));
+        GDK_VERIFY(wally_witness_program_from_bytes_and_version(
+            script.data(), script.size(), witness_ver, flags, &ret[0], ret.size(), &written));
         GDK_RUNTIME_ASSERT(written <= ret.size());
         ret.resize(written);
         return ret;
@@ -413,16 +416,36 @@ namespace sdk {
         return false;
     }
 
-    std::vector<unsigned char> addr_segwit_v0_to_bytes(const std::string& addr, const std::string& family)
+    std::vector<unsigned char> addr_segwit_to_bytes(const std::string& addr, const std::string& family)
     {
         const uint32_t flags = 0;
         size_t written;
-        std::vector<unsigned char> ret(WALLY_SCRIPTPUBKEY_P2WSH_LEN);
-        GDK_VERIFY(wally_addr_segwit_to_bytes(addr.c_str(), family.c_str(), flags, &ret[0], ret.size(), &written));
-        GDK_RUNTIME_ASSERT(written == WALLY_SCRIPTPUBKEY_P2WSH_LEN || written == WALLY_SCRIPTPUBKEY_P2WPKH_LEN);
-        GDK_RUNTIME_ASSERT(ret[0] == 0); // Must be a segwit v0 script
+        std::vector<unsigned char> ret(WALLY_WITNESSSCRIPT_MAX_LEN);
+        bool valid = false;
+
+        if (wally_addr_segwit_to_bytes(addr.c_str(), family.c_str(), flags, &ret[0], ret.size(), &written) == WALLY_OK
+            && written > 0) {
+            // A valid segwit address is either v0 (p2wpkh or p2wsh) or v1 (p2tr).
+            if (ret[0] == OP_0) {
+                valid = written == WALLY_SCRIPTPUBKEY_P2WSH_LEN || written == WALLY_SCRIPTPUBKEY_P2WPKH_LEN;
+            } else if (ret[0] == OP_1) {
+                valid = written == WALLY_SCRIPTPUBKEY_P2TR_LEN;
+            }
+        }
+        if (!valid) {
+            throw user_error(res::id_invalid_address);
+        }
         ret.resize(written);
         return ret;
+    }
+
+    size_t addr_segwit_get_version(const std::string& addr, const std::string& family)
+    {
+        const uint32_t flags = 0;
+        size_t segwit_version;
+        GDK_VERIFY(wally_addr_segwit_get_version(addr.c_str(), family.c_str(), flags, &segwit_version));
+        GDK_RUNTIME_ASSERT(segwit_version <= 16);
+        return segwit_version;
     }
 
     std::string public_key_to_p2pkh_addr(unsigned char btc_version, byte_span_t public_key)
@@ -848,6 +871,13 @@ namespace sdk {
     {
         struct wally_tx* p;
         GDK_VERIFY(wally_tx_init_alloc(version, locktime, inputs_allocation_len, outputs_allocation_len, &p));
+        return wally_tx_ptr(p);
+    }
+
+    wally_tx_ptr tx_from_bin(byte_span_t tx_bin, uint32_t flags)
+    {
+        struct wally_tx* p;
+        GDK_VERIFY(wally_tx_from_bytes(tx_bin.data(), tx_bin.size(), flags, &p));
         return wally_tx_ptr(p);
     }
 

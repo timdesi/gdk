@@ -24,7 +24,7 @@ use crate::interface::{ElectrumUrl, WalletCtx};
 use crate::store::*;
 
 use bitcoin::hashes::hex::ToHex;
-use bitcoin::secp256k1::{self, Secp256k1, SecretKey};
+use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use bitcoin::util::bip32::{DerivationPath, ExtendedPrivKey, ExtendedPubKey};
 
 use electrum_client::GetHistoryRes;
@@ -35,8 +35,8 @@ use gdk_common::network::{aqua_unique_id_and_xpub, Network};
 use gdk_common::password::Password;
 use gdk_common::session::Session;
 use gdk_common::wally::{
-    self, asset_blinding_key_from_seed, asset_blinding_key_to_ec_private_key, asset_unblind,
-    make_str, MasterBlindingKey,
+    self, asset_blinding_key_from_seed, asset_blinding_key_to_ec_private_key, make_str,
+    MasterBlindingKey,
 };
 
 use elements::confidential::{self, Asset, Nonce};
@@ -67,6 +67,10 @@ use std::sync::{mpsc, Arc, RwLock};
 use std::thread::JoinHandle;
 
 const CROSS_VALIDATION_RATE: u8 = 4; // Once every 4 thread loop runs, or roughly 28 seconds
+
+lazy_static! {
+    static ref EC: secp256k1::Secp256k1<secp256k1::All> = secp256k1::Secp256k1::new();
+}
 
 type Aes256Cbc = Cbc<Aes256, Pkcs7>;
 
@@ -254,7 +258,13 @@ fn try_get_fee_estimates(client: &Client) -> Result<Vec<FeeEstimate>, Error> {
     Ok(estimates)
 }
 
-fn make_txlist_item(tx: &TransactionMeta) -> TxListItem {
+pub fn make_txlist_item(
+    tx: &TransactionMeta,
+    all_txs: &BETransactions,
+    all_unblinded: &HashMap<elements::OutPoint, elements::TxOutSecrets>,
+    all_scripts: &HashMap<BEScript, DerivationPath>,
+    network_id: NetworkId,
+) -> TxListItem {
     let type_ = tx.type_.clone();
     let fee_rate = (tx.fee as f64 / tx.weight as f64 * 4000.0) as u64;
     let addressees = tx
@@ -265,11 +275,68 @@ fn make_txlist_item(tx: &TransactionMeta) -> TxListItem {
         .iter()
         .map(|e| e.address.clone())
         .collect();
-    let can_rbf = tx.height.is_none() && tx.rbf_optin && type_ != "incoming";
+    let can_rbf =
+        tx.height.is_none() && tx.rbf_optin && type_ != "incoming" && type_ != "unblindable";
+
+    let transaction = BETransaction::from_hex(&tx.hex, network_id).expect("inconsistent network");
+    let inputs = transaction
+        .previous_outputs()
+        .iter()
+        .enumerate()
+        .map(|(vin, i)| {
+            let mut a = AddressIO::default();
+            a.is_output = false;
+            a.is_spent = true;
+            a.pt_idx = vin as u32;
+            a.satoshi = all_txs.get_previous_output_value(i, all_unblinded).unwrap_or_default();
+            if let BEOutPoint::Elements(outpoint) = i {
+                a.asset_id = all_txs
+                    .get_previous_output_asset(*outpoint, all_unblinded)
+                    .map_or("".to_string(), |a| a.to_hex());
+                a.assetblinder = all_txs
+                    .get_previous_output_assetblinder_hex(*outpoint, all_unblinded)
+                    .unwrap_or_default();
+                a.amountblinder = all_txs
+                    .get_previous_output_amountblinder_hex(*outpoint, all_unblinded)
+                    .unwrap_or_default();
+            }
+            a.is_relevant = {
+                if let Some(script) = all_txs.get_previous_output_script_pubkey(i) {
+                    all_scripts.get(&script).is_some()
+                } else {
+                    false
+                }
+            };
+            a
+        })
+        .collect();
+
+    let outputs = (0..transaction.output_len() as u32)
+        .map(|vout| {
+            let mut a = AddressIO::default();
+            a.is_output = true;
+            // FIXME: this can be wrong, however setting this value correctly might be quite
+            // expensive: involing db hits and potentially network calls; postponing it for now.
+            a.is_spent = false;
+            a.pt_idx = vout;
+            a.satoshi = transaction.output_value(vout, all_unblinded).unwrap_or_default();
+            if let BETransaction::Elements(_) = transaction {
+                a.asset_id = transaction
+                    .output_asset(vout, all_unblinded)
+                    .map_or("".to_string(), |a| a.to_hex());
+                a.assetblinder =
+                    transaction.output_assetblinder_hex(vout, all_unblinded).unwrap_or_default();
+                a.amountblinder =
+                    transaction.output_amountblinder_hex(vout, all_unblinded).unwrap_or_default();
+            }
+            a.is_relevant = all_scripts.contains_key(&transaction.output_script(vout));
+            a
+        })
+        .collect();
 
     TxListItem {
         block_height: tx.height.unwrap_or_default(),
-        created_at: tx.created_at.clone(),
+        created_at_ts: tx.timestamp as u64,
         type_,
         memo: tx.create_transaction.as_ref().and_then(|c| c.memo.clone()).unwrap_or("".to_string()),
         txhash: tx.txid.clone(),
@@ -278,16 +345,16 @@ fn make_txlist_item(tx: &TransactionMeta) -> TxListItem {
         rbf_optin: tx.rbf_optin, // TODO: TransactionMeta -> TxListItem rbf_optin
         can_cpfp: false,         // TODO: TransactionMeta -> TxListItem can_cpfp
         can_rbf,
-        has_payment_request: false, // TODO: TransactionMeta -> TxListItem has_payment_request
+        has_payment_request: false, // TODO: Remove
         server_signed: false,       // TODO: TransactionMeta -> TxListItem server_signed
         user_signed: tx.user_signed,
         spv_verified: tx.spv_verified.to_string(),
-        instant: false,
+        instant: false, // TODO: Remove
         fee: tx.fee,
         fee_rate,
-        addressees,      // notice the extra "e" -- its intentional
-        inputs: vec![],  // tx.input.iter().map(format_gdk_input).collect(),
-        outputs: vec![], //tx.output.iter().map(format_gdk_output).collect(),
+        addressees, // notice the extra "e" -- its intentional
+        inputs,
+        outputs,
         transaction_size: tx.size,
         transaction_vsize: tx.vsize,
         transaction_weight: tx.weight,
@@ -696,13 +763,28 @@ impl Session<Error> for ElectrumSession {
     }
 
     fn get_transactions(&self, opt: &GetTransactionsOpt) -> Result<TxsResult, Error> {
-        let txs = self.get_wallet()?.list_tx(opt)?.iter().map(make_txlist_item).collect();
-
+        let wallet = self.get_wallet()?;
+        let store = wallet.store.read()?;
+        let acc_store = store.account_cache(opt.subaccount)?;
+        let txs = self
+            .get_wallet()?
+            .list_tx(opt)?
+            .iter()
+            .map(|tx| {
+                make_txlist_item(
+                    tx,
+                    &acc_store.all_txs,
+                    &acc_store.unblinded,
+                    &acc_store.paths,
+                    self.network.id(),
+                )
+            })
+            .collect();
         Ok(TxsResult(txs))
     }
 
-    fn get_transaction_details(&self, _txid: &str) -> Result<Value, Error> {
-        Err(Error::Generic("implementme: ElectrumSession get_transaction_details".into()))
+    fn get_raw_transaction_details(&self, _txid: &str) -> Result<Value, Error> {
+        Err(Error::Generic("implementme: ElectrumSession get_raw_transaction_details".into()))
     }
 
     fn get_balance(&self, opt: &GetBalanceOpt) -> Result<Balances, Error> {
@@ -883,7 +965,7 @@ impl Session<Error> for ElectrumSession {
                     .store
                     .read()?
                     .read_asset_registry()?
-                    .ok_or_else(|| Error::Generic("assets registry not available".into()))?,
+                    .unwrap_or_else(|| get_registry_sentinel()),
             };
             map.insert("assets".to_string(), assets_not_null);
         }
@@ -896,7 +978,7 @@ impl Session<Error> for ElectrumSession {
                     .store
                     .read()?
                     .read_asset_icons()?
-                    .ok_or_else(|| Error::Generic("icon registry not available".into()))?,
+                    .unwrap_or_else(|| get_registry_sentinel()),
             };
             map.insert("icons".to_string(), icons_not_null);
         }
@@ -1128,7 +1210,7 @@ impl Headers {
 #[derive(Default)]
 struct DownloadTxResult {
     txs: Vec<(BETxid, BETransaction)>,
-    unblinds: Vec<(elements::OutPoint, Unblinded)>,
+    unblinds: Vec<(elements::OutPoint, elements::TxOutSecrets)>,
 }
 
 impl Syncer {
@@ -1387,56 +1469,34 @@ impl Syncer {
         &self,
         outpoint: elements::OutPoint,
         output: elements::TxOut,
-    ) -> Result<Unblinded, Error> {
+    ) -> Result<elements::TxOutSecrets, Error> {
         match (output.asset, output.value, output.nonce) {
             (
-                Asset::Confidential(_, _),
-                confidential::Value::Confidential(_, _),
-                Nonce::Confidential(_, _),
+                Asset::Confidential(_),
+                confidential::Value::Confidential(_),
+                Nonce::Confidential(_),
             ) => {
                 let master_blinding = self.master_blinding.as_ref().unwrap();
 
                 let script = output.script_pubkey.clone();
                 let blinding_key = asset_blinding_key_to_ec_private_key(master_blinding, &script);
-                let rangeproof = output.witness.rangeproof.clone();
-                let value_commitment = elements::encode::serialize(&output.value);
-                let asset_commitment = elements::encode::serialize(&output.asset);
-                let nonce_commitment = elements::encode::serialize(&output.nonce);
+                let txout_secrets = output.unblind(&EC, blinding_key)?;
                 info!(
-                    "commitments len {} {} {}",
-                    value_commitment.len(),
-                    asset_commitment.len(),
-                    nonce_commitment.len()
+                    "Unblinded outpoint:{} asset:{} value:{}",
+                    outpoint,
+                    txout_secrets.asset.to_hex(),
+                    txout_secrets.value
                 );
-                let sender_pk = secp256k1::PublicKey::from_slice(&nonce_commitment).unwrap();
 
-                let (asset, abf, vbf, value) = asset_unblind(
-                    sender_pk,
-                    blinding_key,
-                    rangeproof,
-                    value_commitment,
-                    script,
-                    asset_commitment,
-                )?;
-
-                info!("Unblinded outpoint:{} asset:{} value:{}", outpoint, asset.to_hex(), value);
-
-                let unblinded = Unblinded {
-                    asset,
-                    value,
-                    abf,
-                    vbf,
-                };
-                Ok(unblinded)
+                Ok(txout_secrets)
             }
             (Asset::Explicit(asset_id), confidential::Value::Explicit(satoshi), _) => {
-                let unblinded = Unblinded {
+                Ok(elements::TxOutSecrets {
                     asset: asset_id,
                     value: satoshi,
-                    abf: [0u8; 32],
-                    vbf: [0u8; 32],
-                };
-                Ok(unblinded)
+                    asset_bf: elements::confidential::AssetBlindingFactor::zero(),
+                    value_bf: elements::confidential::ValueBlindingFactor::zero(),
+                })
             }
             _ => Err(Error::Generic("Unexpected asset/value/nonce".into())),
         }
@@ -1451,4 +1511,9 @@ fn wait_or_close(r: &Receiver<()>, interval: u32) -> bool {
         }
     }
     false
+}
+
+// Return a sentinel value that the caller should interpret as "no cached data"
+fn get_registry_sentinel() -> Value {
+    json!({})
 }

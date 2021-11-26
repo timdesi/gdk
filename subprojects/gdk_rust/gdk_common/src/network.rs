@@ -32,11 +32,13 @@ pub struct Network {
     // to retain backwards compatibility.
     pub spv_multi: Option<bool>,
     pub spv_servers: Option<Vec<String>>,
+    pub taproot_enabled_at: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementsNetwork {
     Liquid,
+    LiquidTestnet,
     ElementsRegtest,
 }
 
@@ -61,11 +63,29 @@ impl NetworkId {
     }
 }
 
+pub const LIQUID_TESTNET: elements::AddressParams = elements::AddressParams {
+    p2pkh_prefix: 36,
+    p2sh_prefix: 19,
+    blinded_prefix: 23,
+    bech_hrp: "tex",
+    blech_hrp: "tlq",
+};
+
+impl ElementsNetwork {
+    pub fn address_params(self: ElementsNetwork) -> &'static elements::AddressParams {
+        match self {
+            ElementsNetwork::Liquid => &elements::AddressParams::LIQUID,
+            ElementsNetwork::LiquidTestnet => &LIQUID_TESTNET,
+            ElementsNetwork::ElementsRegtest => &elements::AddressParams::ELEMENTS,
+        }
+    }
+}
+
 impl Network {
     pub fn id(&self) -> NetworkId {
         match (self.liquid, self.mainnet, self.development) {
             (true, true, false) => NetworkId::Elements(ElementsNetwork::Liquid),
-            (true, false, false) => NetworkId::Elements(ElementsNetwork::ElementsRegtest),
+            (true, false, false) => NetworkId::Elements(ElementsNetwork::LiquidTestnet),
             (true, false, true) => NetworkId::Elements(ElementsNetwork::ElementsRegtest),
             (false, true, false) => NetworkId::Bitcoin(bitcoin::Network::Bitcoin),
             (false, false, false) => NetworkId::Bitcoin(bitcoin::Network::Testnet),
@@ -94,7 +114,7 @@ impl Network {
     pub fn wallet_hash_id(&self, master_xpub: &ExtendedPubKey) -> String {
         assert_eq!(self.bip32_network(), master_xpub.network);
         let password = master_xpub.encode().to_vec();
-        let salt = self.name.as_bytes().to_vec();
+        let salt = self.network.as_bytes().to_vec();
         let cost = 2048;
         hex::encode(crate::wally::pbkdf2_hmac_sha512_256(password, salt, cost))
     }
@@ -178,7 +198,7 @@ pub fn aqua_unique_id_and_xpub(
 #[cfg(test)]
 mod tests {
     use crate::network::{aqua_unique_id_and_xpub, ElementsNetwork, NetworkId};
-    use bitcoin::util::bip32::ExtendedPubKey;
+    use bitcoin::util::bip32::{ExtendedPrivKey, ExtendedPubKey};
     use bitcoin::Network;
     use std::str::FromStr;
 
@@ -217,6 +237,26 @@ mod tests {
         assert_eq!(
             xpub_liquid,
             ExtendedPubKey::from_str("tpubDCj7tPbTBu12vKY9UjbQSsBMVm9c1ktgp6cEHsPiv4WEB8vngnMpyY8tsmUDgEs3fg6SEvhmv7YF9fLYMiLsHt7B5oABqGTQuiShhp6DuVU").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_wallet_hash_id() {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let seed = crate::wally::bip39_mnemonic_to_seed(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            "",
+        ).unwrap();
+        let master_xprv = ExtendedPrivKey::new_master(bitcoin::Network::Bitcoin, &seed).unwrap();
+        let master_xpub = ExtendedPubKey::from_private(&secp, &master_xprv);
+        let mut network = crate::Network::default();
+        network.network = "mainnet".to_string();
+        network.mainnet = true;
+        let wallet_hash_id = network.wallet_hash_id(&master_xpub);
+        // Value got logging in with the above mnemonic with network name "mainnet" (ga_session)
+        assert_eq!(
+            wallet_hash_id,
+            "ca8f6b74e485133f441e01313682e6d5613cedbe479b2c472e017e21cc42a052"
         );
     }
 }

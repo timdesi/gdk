@@ -34,7 +34,12 @@ Connection parameters JSON
       "use_tor": true,
       "user_agent": "green_android v2.33",
       "spv_enabled": false,
+      "cert_expiry_threshold": 1,
    }
+
+:cert_expiry_threshold: Reject/ignore certificates expiring within this many days
+                        from today. This is useful for pre-empting problems with
+                        expiring embedded certificates.
 
 .. _login-credentials:
 
@@ -125,6 +130,25 @@ allow a PIN login.
    }
 
 
+.. _wallet-id-request:
+
+Wallet identifier request JSON
+------------------------------
+
+Describes the wallet to compute an identifier for using `GA_get_wallet_identifier`.
+You may pass :ref:`login-credentials` to compute an identifier from a mnemonic
+and optional password, note that PIN or watch-only credentials cannot be used.
+otherwise, pass the wallets master xpub as follows:
+
+.. code-block:: json
+
+   {
+      "master_xpub": "tpubD8G8MPH9RK9uk4EV97RxhzaY8SJPUWXnViHUwji92i8B7vYdht797PPDrJveeathnKxonJe8SbaScAC1YJ8xAzZbH9UvywrzpQTQh5pekkk",
+   }
+
+:master_xpub: The base58-encoded BIP32 extended master public key of the wallet.
+
+
 .. _subaccount-detail:
 
 Subaccount JSON
@@ -213,10 +237,9 @@ Transaction list JSON
         "calculated_fee_rate": 1004,
         "can_cpfp": true,
         "can_rbf": false,
-        "created_at": "2019-02-27 15:12:04",
+        "created_at_ts": 1551280324000000,
         "fee": 206,
         "fee_rate": 1004,
-        "has_payment_request": false,
         "inputs": [
           {
             "address": "",
@@ -233,7 +256,6 @@ Transaction list JSON
             "subtype": 0
           }
         ],
-        "instant": false,
         "memo": "",
         "outputs": [
           {
@@ -268,7 +290,6 @@ Transaction list JSON
         "rbf_optin": true,
         "satoshi": 200000,
         "server_signed": true,
-        "transaction": "02000000000101e8052d983019fa66c10f311d04f5d11e8ceb058f2653a0f4f74f82283119a7f10100000023220020b5117c293841984f37d3c0282404f6d1942baf11ad7c55c121bb073fd149e184fdffffff02400d03000000000017a9146de2cd94e2099356f861e1944d577037c6bbb23f87d7ef18000000000017a914a4fe49c0d25b89245753247e121520a96261dc2f87040047304402200cc587a9c7688bdf6be35067bd9f4b4271e232906d21e4f4a1ef11dbcca6a47402201825fb44368353e03982d5a4713cfef2123c136b8cad1de5d66ae33a729bf275014730440220049c1e16842d853d7fca780e1735779f2cc00f3e9b6caf163161a60ae1aeb19c02207b24a0b920d241be72e9887f6951d81a7230c0aad2e708e8dcc1c78d7a433715014752210316803ed4d0a589e3703efa04fdd09fc355aae4c931dd2bce5d71f2b8f9b17c262102f201a83a892804664d3e574bf23c5bebd0c319ed62111a5120c700039a745e9952aefb9c1600",
         "transaction_size": 370,
         "transaction_vsize": 205,
         "transaction_weight": 820,
@@ -632,10 +653,12 @@ Fee estimates JSON
 
   {"fees":[1000,10070,10070,10070,3014,3014,3014,2543,2543,2543,2543,2543,2543,1499,1499,1499,1499,1499,1499,1499,1499,1499,1499,1499,1499]}
 
-.. _configuration:
+.. _twofactor_configuration:
 
 Two-Factor config JSON
 ----------------------
+
+Describes the wallets enabled two factor methods, current spending limits, and two factor reset status.
 
 .. code-block:: json
 
@@ -689,6 +712,10 @@ Two-Factor config JSON
   }
  }
 
+:twofactor_reset/days_remaining: The number of days remaining before the wallets two factor
+                                 authentication is reset, or -1 if no reset procedure is underway.
+:twofactor_reset/is_active: Whether or not the wallet is currently undergoing the two factor reset procedure.
+:twofactor_reset/is_disputed: Whether or not the wallet two factor reset procedure is disputed.
 
 
 .. _settings:

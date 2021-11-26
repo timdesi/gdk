@@ -8,7 +8,7 @@ namespace sdk {
 
     class ga_rust final : public session_impl {
     public:
-        ga_rust(const nlohmann::json& net_params, nlohmann::json& defaults);
+        explicit ga_rust(network_parameters&& net_params);
         ~ga_rust();
 
         bool is_connected() const;
@@ -92,7 +92,7 @@ namespace sdk {
         nlohmann::json get_unspent_outputs_for_private_key(
             const std::string& private_key, const std::string& password, uint32_t unused);
         nlohmann::json set_unspent_outputs_status(const nlohmann::json& details, const nlohmann::json& twofactor_data);
-        nlohmann::json get_transaction_details(const std::string& txhash_hex) const;
+        wally_tx_ptr get_raw_transaction_details(const std::string& txhash_hex) const;
 
         nlohmann::json create_transaction(const nlohmann::json& details);
         nlohmann::json sign_transaction(const nlohmann::json& details);
@@ -129,7 +129,6 @@ namespace sdk {
         user_pubkeys& get_user_pubkeys();
         ga_user_pubkeys& get_recovery_pubkeys();
 
-        void set_local_encryption_keys(const pub_key_t& public_key, std::shared_ptr<signer> signer);
         void disable_all_pin_logins();
 
         static int32_t spv_verify_tx(const nlohmann::json& details);

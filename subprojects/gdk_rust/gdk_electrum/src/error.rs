@@ -15,6 +15,7 @@ pub enum Error {
     NonConfidentialAddress,
     InvalidAmount,
     EmptyAddressees,
+    FeeRateBelowMinimum,
     AssetEmpty,
     InvalidHeaders,
     InvalidSubaccount(u32),
@@ -38,10 +39,14 @@ pub enum Error {
     ClientError(electrum_client::Error),
     SliceConversionError(std::array::TryFromSliceError),
     ElementsEncode(elements::encode::Error),
+    ElementsPset(elements::pset::Error),
+    PsetBlindError(elements::pset::PsetBlindError),
+    UnblindError(elements::UnblindError),
     Common(gdk_common::error::Error),
     Send(std::sync::mpsc::SendError<()>),
     Encryption(block_modes::BlockModeError),
     Secp256k1(bitcoin::secp256k1::Error),
+    Secp256k1Zkp(elements::secp256k1_zkp::Error),
 }
 
 impl Display for Error {
@@ -57,6 +62,7 @@ impl Display for Error {
             Error::InvalidAmount => write!(f, "invalid amount"),
             Error::InvalidHeaders => write!(f, "invalid headers"),
             Error::EmptyAddressees => write!(f, "addressees cannot be empty"),
+            Error::FeeRateBelowMinimum => write!(f, "fee rate below minimum"),
             Error::AssetEmpty => write!(f, "asset_id cannot be empty in liquid"),
             Error::InvalidSubaccount(sub) => write!(f, "invalid subaccount {}", sub),
             Error::AccountGapsDisallowed => {
@@ -74,10 +80,14 @@ impl Display for Error {
             Error::ClientError(ref client_err) => write!(f, "client: {:?}", client_err),
             Error::SliceConversionError(ref slice_err) => write!(f, "slice: {}", slice_err),
             Error::ElementsEncode(ref el_err) => write!(f, "el_err: {}", el_err),
+            Error::ElementsPset(ref el_err) => write!(f, "el_err_pset: {}", el_err),
+            Error::PsetBlindError(ref el_err) => write!(f, "pset_blind_err: {}", el_err),
+            Error::UnblindError(ref unbl_err) => write!(f, "Unblind_err: {}", unbl_err),
             Error::Common(ref cmn_err) => write!(f, "cmn_err: {:?}", cmn_err),
             Error::Send(ref send_err) => write!(f, "send_err: {:?}", send_err),
             Error::Encryption(ref send_err) => write!(f, "encryption_err: {:?}", send_err),
             Error::Secp256k1(ref err) => write!(f, "Secp256k1_err: {:?}", err),
+            Error::Secp256k1Zkp(ref err) => write!(f, "Secp256k1_zkp_err: {:?}", err),
             Error::PinError => write!(f, "PinError"),
             Error::InvalidPin => write!(f, "id_invalid_pin"),
             Error::InvalidElectrumUrl(url) => write!(f, "Invalid Electrum URL: {}", url),
@@ -163,6 +173,24 @@ impl From<elements::encode::Error> for Error {
     }
 }
 
+impl From<elements::pset::Error> for Error {
+    fn from(err: elements::pset::Error) -> Self {
+        Error::ElementsPset(err)
+    }
+}
+
+impl From<elements::pset::PsetBlindError> for Error {
+    fn from(err: elements::pset::PsetBlindError) -> Self {
+        Error::PsetBlindError(err)
+    }
+}
+
+impl From<elements::UnblindError> for Error {
+    fn from(err: elements::UnblindError) -> Self {
+        Error::UnblindError(err)
+    }
+}
+
 impl From<gdk_common::error::Error> for Error {
     fn from(err: gdk_common::error::Error) -> Self {
         Error::Common(err)
@@ -190,6 +218,12 @@ impl From<block_modes::BlockModeError> for Error {
 impl From<bitcoin::secp256k1::Error> for Error {
     fn from(err: bitcoin::secp256k1::Error) -> Self {
         Error::Secp256k1(err)
+    }
+}
+
+impl From<elements::secp256k1_zkp::Error> for Error {
+    fn from(err: elements::secp256k1_zkp::Error) -> Self {
+        Error::Secp256k1Zkp(err)
     }
 }
 

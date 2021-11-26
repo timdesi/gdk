@@ -11,6 +11,7 @@
 #include "ga_strings.hpp"
 #include "ga_tx.hpp"
 #include "logging.hpp"
+#include "signer.hpp"
 #include "transaction_utils.hpp"
 #include "utils.hpp"
 #include "xpub_hdkey.hpp"
@@ -211,7 +212,7 @@ namespace sdk {
             }
             GDK_RUNTIME_ASSERT(subaccount_ok);
 
-            const auto tx = tx_from_hex(prev_tx.at("transaction"));
+            const auto tx = session.get_raw_transaction_details(prev_tx.at("txhash"));
             const auto min_fee_rate = session.get_min_fee_rate();
 
             // Store the old fee and fee rate to check if replacement
@@ -246,7 +247,8 @@ namespace sdk {
                 for (const auto& output : outputs) {
                     if (!output.at("address").empty()) {
                         // Validate address matches the transaction scriptpubkey
-                        const auto spk_from_address = scriptpubkey_from_address(net_params, output["address"]);
+                        const auto spk_from_address
+                            = scriptpubkey_from_address(net_params, session.get_block_height(), output["address"]);
                         const auto& o = tx->outputs[i];
                         const auto spk_from_tx = gsl::make_span(o.script, o.script_len);
                         GDK_RUNTIME_ASSERT(static_cast<size_t>(spk_from_tx.size()) == spk_from_address.size());
@@ -256,9 +258,9 @@ namespace sdk {
                     const bool is_relevant = json_get_value(output, "is_relevant", false);
                     if (is_relevant) {
                         // Validate address is owned by the wallet
-                        const auto witness_script = session.output_script_from_utxo(output);
+                        const auto output_script = session.output_script_from_utxo(output);
                         const std::string address
-                            = get_address_from_script(net_params, witness_script, output.at("address_type"));
+                            = get_address_from_script(net_params, output_script, output.at("address_type"));
                         GDK_RUNTIME_ASSERT(output["address"] == address);
                     }
                     if (is_relevant && change_index == NO_CHANGE_INDEX) {
@@ -527,7 +529,7 @@ namespace sdk {
                 have_assets = true;
             } else {
                 if (have_assets) {
-                    set_tx_error(result, "Assets cannot be used on Bitcoin"); // FIXME: res::
+                    set_tx_error(result, res::id_assets_cannot_be_used_on_bitcoin);
                 }
             }
             result["addressees_have_assets"] = have_assets;
@@ -609,7 +611,7 @@ namespace sdk {
                         = have_change_p != result.end() ? json_get_value(*have_change_p, policy_asset, false) : false;
                     if (have_change_output) {
                         const auto change_address = result.at("change_address").at(policy_asset).at("address");
-                        add_tx_output(net_params, result, tx, change_address);
+                        add_tx_output(net_params, session.get_block_height(), result, tx, change_address);
                         change_index = tx->num_outputs - 1;
                     }
                 }
@@ -763,7 +765,8 @@ namespace sdk {
                     // output to collect it, then loop again in case the amount
                     // this increases the fee by requires more UTXOs.
                     const auto change_address = result.at("change_address").at(asset_id).at("address");
-                    add_tx_output(net_params, result, tx, change_address, is_liquid ? 1 : 0, asset_id);
+                    add_tx_output(net_params, session.get_block_height(), result, tx, change_address, is_liquid ? 1 : 0,
+                        asset_id);
                     have_change_output = true;
                     change_index = tx->num_outputs - 1;
                     if (is_liquid && include_fee) {
@@ -793,9 +796,15 @@ namespace sdk {
                             change_output.satoshi = change_amount;
                             const uint32_t new_change_index = get_uniform_uint32_t(tx->num_outputs);
                             // Randomize change output
-                            if (change_index != new_change_index) {
-                                std::swap(tx->outputs[new_change_index], change_output);
-                                change_index = new_change_index;
+                            // Move change output to random offset in tx outputs while
+                            // preserving the ordering of the other outputs
+                            while (change_index < new_change_index) {
+                                std::swap(tx->outputs[change_index], tx->outputs[change_index + 1]);
+                                ++change_index;
+                            }
+                            while (change_index > new_change_index) {
+                                std::swap(tx->outputs[change_index], tx->outputs[change_index - 1]);
+                                --change_index;
                             }
                         }
                     }
@@ -892,7 +901,8 @@ namespace sdk {
                     auto wit = tx_witness_stack_init(1);
                     tx_witness_stack_add(wit, der);
                     tx_set_input_witness(tx, index, wit);
-                    tx_set_input_script(tx, index, witness_script(script));
+                    const uint32_t witness_ver = 0;
+                    tx_set_input_script(tx, index, witness_script(script, witness_ver));
                 } else {
                     tx_set_input_script(tx, index, input_script(low_r, script, user_sig));
                 }
@@ -956,7 +966,8 @@ namespace sdk {
             auto wit = tx_witness_stack_init(1);
             tx_witness_stack_add(wit, der);
             tx_set_input_witness(tx, index, wit);
-            tx_set_input_script(tx, index, witness_script(script));
+            const uint32_t witness_ver = 0;
+            tx_set_input_script(tx, index, witness_script(script, witness_ver));
         } else {
             constexpr bool has_sighash = true;
             const auto user_sig = ec_sig_from_der(der, has_sighash);

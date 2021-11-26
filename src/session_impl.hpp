@@ -6,8 +6,8 @@
 
 #include "amount.hpp"
 #include "autobahn_wrapper.hpp"
+#include "ga_wally.hpp"
 #include "network_parameters.hpp"
-#include "signer.hpp"
 
 namespace ga {
 namespace sdk {
@@ -18,12 +18,13 @@ namespace sdk {
     class ga_pubkeys;
     class ga_user_pubkeys;
     class user_pubkeys;
+    class signer;
 
     class session_impl {
     public:
         using locker_t = std::unique_lock<std::mutex>;
 
-        explicit session_impl(const nlohmann::json& net_params, nlohmann::json& defaults);
+        explicit session_impl(network_parameters&& net_params);
         session_impl(const session_impl& other) = delete;
         session_impl(session_impl&& other) noexcept = delete;
         session_impl& operator=(const session_impl& other) = delete;
@@ -54,8 +55,8 @@ namespace sdk {
             const nlohmann::json& details, const nlohmann::json& twofactor_data)
             = 0;
 
-        virtual void register_user(const std::string& master_pub_key_hex, const std::string& master_chain_code_hex,
-            const std::string& gait_path_hex, bool supports_csv);
+        virtual nlohmann::json register_user(const std::string& master_pub_key_hex,
+            const std::string& master_chain_code_hex, const std::string& gait_path_hex, bool supports_csv);
 
         virtual bool is_connected() const = 0;
         virtual void set_ping_fail_handler(ping_fail_t handler) = 0;
@@ -97,6 +98,9 @@ namespace sdk {
         virtual void change_settings_limits(const nlohmann::json& limit_details, const nlohmann::json& twofactor_data)
             = 0;
         virtual nlohmann::json get_transactions(const nlohmann::json& details) = 0;
+        virtual nlohmann::json sync_transactions(uint32_t subaccount, unique_pubkeys_and_scripts_t& missing);
+        virtual void store_transactions(uint32_t subaccount, nlohmann::json& txs);
+        virtual void postprocess_transactions(nlohmann::json& tx_list);
 
         virtual void set_notification_handler(GA_notification_handler handler, void* context);
 
@@ -152,12 +156,12 @@ namespace sdk {
 
         virtual bool set_blinding_nonce(
             const std::string& pubkey_hex, const std::string& script_hex, const std::string& nonce_hex);
-        virtual bool get_uncached_blinding_nonces(const nlohmann::json& details, nlohmann::json& twofactor_data);
         virtual void upload_confidential_addresses(
             uint32_t subaccount, const std::vector<std::string>& confidential_addresses)
             = 0;
 
-        virtual nlohmann::json get_transaction_details(const std::string& txhash_hex) const = 0;
+        virtual wally_tx_ptr get_raw_transaction_details(const std::string& txhash_hex) const = 0;
+        nlohmann::json get_transaction_details(const std::string& txhash_hex) const;
 
         virtual nlohmann::json create_transaction(const nlohmann::json& details) = 0;
         virtual nlohmann::json sign_transaction(const nlohmann::json& details) = 0;
@@ -190,7 +194,7 @@ namespace sdk {
         virtual nlohmann::json get_spending_limits() const = 0;
         virtual bool is_spending_limits_decrease(const nlohmann::json& limit_details) = 0;
 
-        virtual void set_local_encryption_keys(const pub_key_t& public_key, std::shared_ptr<signer> signer) = 0;
+        virtual void set_local_encryption_keys(const pub_key_t& public_key, std::shared_ptr<signer> signer);
         virtual void save_cache();
         virtual void disable_all_pin_logins() = 0;
 

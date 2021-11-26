@@ -162,6 +162,9 @@ test_rust:
     - git clone https://github.com/ElementsProject/libwally-core
     - cd libwally-core && git checkout 88fc78ff72a4f3345fcb87d1c19dc5f6cc5b0e4c && ./tools/autogen.sh && ./configure --enable-debug --prefix=$PWD/build --enable-static --disable-shared --enable-elements --enable-ecmult-static-precomputation && make && make install && cd ..
     - export WALLY_DIR=$PWD/libwally-core/build/lib/
+    - curl -L https://github.com/openssl/openssl/archive/OpenSSL_1_1_1g.tar.gz | tar -xvz -C ${PWD}/subprojects
+    - MESON_SOURCE_ROOT=${PWD} MESON_BUILD_ROOT=${PWD} ${PWD}/tools/buildopenssl.sh
+    - export OPENSSL_DIR=${PWD}/openssl/build OPENSSL_STATIC=1
     - cd subprojects/gdk_rust/gdk_common
     - RUST_BACKTRACE=1 cargo test
     - cd ../gdk_electrum
@@ -286,7 +289,7 @@ apidocs:
   script:
     - virtualenv -p python3 .venv
     - source .venv/bin/activate
-    - pip3 install sphinx sphinx_rtd_theme
+    - pip3 install -r docs/requirements.txt
     - sphinx-build -b html -a -c docs/source docs/source docs/build/html
     - cd docs/build && tar czf ../../apidocs.tar.gz html/ && cd ../..
     - deactivate

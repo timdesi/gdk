@@ -8,7 +8,6 @@ use crate::error::Error;
 use crate::scripts::ScriptType;
 use bitcoin::util::address::AddressType;
 use bitcoin::util::bip32::{ChildNumber, DerivationPath};
-use chrono::{DateTime, NaiveDateTime, Utc};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::Display;
@@ -93,6 +92,22 @@ pub struct LoginData {
     pub wallet_hash_id: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum UtxoStrategy {
+    /// Add utxos until the addressees amounts and fees are covered
+    Default,
+
+    /// Uses all and only the utxos specified by the caller
+    Manual,
+}
+
+impl Default for UtxoStrategy {
+    fn default() -> Self {
+        UtxoStrategy::Default
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct CreateTransaction {
     #[serde(default)]
@@ -106,13 +121,15 @@ pub struct CreateTransaction {
     pub previous_transaction: Option<TxListItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memo: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub utxos: Option<GetUnspentOutputs>,
+    #[serde(default)]
+    pub utxos: GetUnspentOutputs,
     /// Minimum number of confirmations for coin selection
     #[serde(default)]
     pub num_confs: u32,
     #[serde(default)]
     pub confidential_utxos_only: bool,
+    #[serde(default)]
+    pub utxo_strategy: UtxoStrategy,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -237,8 +254,7 @@ pub struct TransactionMeta {
     pub txid: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
-    pub timestamp: u32, // for confirmed tx is block time for unconfirmed is when created or when list_tx happens
-    pub created_at: String, // yyyy-MM-dd HH:mm:ss of timestamp
+    pub timestamp: u64, // in microseconds, for confirmed tx is block time for unconfirmed is when created or when list_tx happens
     pub error: String,
     pub addressees_have_assets: bool,
     pub addressees_read_only: bool,
@@ -271,7 +287,6 @@ impl From<BETransaction> for TransactionMeta {
         TransactionMeta {
             create_transaction: None,
             height: None,
-            created_at: format(timestamp),
             timestamp,
             txid,
             hex,
@@ -306,7 +321,7 @@ impl TransactionMeta {
     pub fn new(
         transaction: impl Into<TransactionMeta>,
         height: Option<u32>,
-        timestamp: Option<u32>,
+        timestamp: Option<u64>,
         satoshi: Balances,
         fee: u64,
         network: Network,
@@ -317,12 +332,10 @@ impl TransactionMeta {
     ) -> Self {
         let mut wgtx: TransactionMeta = transaction.into();
         let timestamp = timestamp.unwrap_or_else(now);
-        let created_at = format(timestamp);
 
         wgtx.create_transaction = Some(create_transaction);
         wgtx.height = height;
         wgtx.timestamp = timestamp;
-        wgtx.created_at = created_at;
         wgtx.satoshi = satoshi;
         wgtx.network = Some(network);
         wgtx.fee = fee;
@@ -338,22 +351,48 @@ pub struct AddressIO {
     pub address: String,
     pub address_type: StringSerialized<AddressType>,
     pub addressee: String,
-    pub is_output: String,
-    pub is_relevant: String,
-    pub is_spent: String,
+    pub is_output: bool,
+    // True if the corresponding scriptpubkey belongs to the account (not the wallet)
+    pub is_relevant: bool,
+    pub is_spent: bool,
     pub pointer: u32, // child_number in bip32 terminology
     pub pt_idx: u32,  // vout
-    pub satoshi: i64,
+    pub satoshi: u64,
+    pub asset_id: String,
+    pub assetblinder: String,
+    pub amountblinder: String,
     pub script_type: u32,
     pub subaccount: u32,
     pub subtype: u32, // unused here, but used in gdk interface for CSV bucketing
+}
+
+impl Default for AddressIO {
+    fn default() -> Self {
+        AddressIO {
+            address: "".into(),
+            address_type: bitcoin::util::address::AddressType::P2sh.into(),
+            addressee: "".into(),
+            asset_id: "".into(),
+            is_output: false,
+            is_relevant: false,
+            is_spent: false,
+            pointer: 0,
+            pt_idx: 0,
+            satoshi: 0,
+            script_type: 0,
+            subaccount: 0,
+            subtype: 0,
+            assetblinder: "".into(),
+            amountblinder: "".into(),
+        }
+    }
 }
 
 // TODO remove TxListItem, make TransactionMeta compatible and automatically serialized
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TxListItem {
     pub block_height: u32,
-    pub created_at: String,
+    pub created_at_ts: u64, // in microseconds
     #[serde(rename = "type")]
     pub type_: String,
     pub memo: String,
@@ -365,9 +404,11 @@ pub struct TxListItem {
     pub rbf_optin: bool,
     pub can_cpfp: bool,
     pub can_rbf: bool,
+    #[serde(skip)]
     pub has_payment_request: bool,
     pub server_signed: bool,
     pub user_signed: bool,
+    #[serde(skip)]
     pub instant: bool,
     pub spv_verified: String,
     pub fee: u64,
@@ -486,10 +527,21 @@ pub struct SetAccountHiddenOpt {
 
 /// {"icons":true,"assets":false,"refresh":false}
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(default)]
 pub struct RefreshAssets {
     pub icons: bool,
     pub assets: bool,
     pub refresh: bool,
+}
+
+impl Default for RefreshAssets {
+    fn default() -> Self {
+        Self {
+            icons: false,
+            assets: false,
+            refresh: true,
+        }
+    }
 }
 
 impl RefreshAssets {
@@ -525,15 +577,11 @@ impl Default for Settings {
     }
 }
 
-fn now() -> u32 {
+fn now() -> u64 {
     let start = SystemTime::now();
     let since_the_epoch = start.duration_since(UNIX_EPOCH).expect("Time went backwards");
-    since_the_epoch.as_secs() as u32
-}
-
-fn format(timestamp: u32) -> String {
-    let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(timestamp as i64, 0), Utc);
-    format!("{}", dt.format("%Y-%m-%d %H:%M:%S"))
+    // Realistic timestamps can be converted to u64
+    u64::try_from(since_the_epoch.as_micros()).unwrap_or(u64::MAX)
 }
 
 impl SPVVerifyResult {
@@ -576,6 +624,7 @@ pub struct UnspentOutput {
     pub txhash: String,
     /// `true` iff belongs to internal chain, i.e. is change
     pub is_internal: bool,
+    pub confidential: bool,
     #[serde(skip)]
     pub derivation_path: DerivationPath,
     #[serde(skip)]
@@ -591,6 +640,7 @@ impl UnspentOutput {
         unspent_output.pt_idx = outpoint.vout();
         unspent_output.derivation_path = info.path.clone();
         unspent_output.scriptpubkey = info.script.clone();
+        unspent_output.confidential = info.confidential;
         let mut iter = info.path.into_iter().rev();
         if let Some(&ChildNumber::Normal {
             index,
@@ -640,6 +690,7 @@ impl TryFrom<&GetUnspentOutputs> for Utxos {
                             e.scriptpubkey.clone().into(),
                             height,
                             e.derivation_path.clone(),
+                            e.confidential,
                         ),
                     ),
                 };
@@ -656,7 +707,7 @@ mod test {
 
     #[test]
     fn test_unspent() {
-        let json_str = r#"{"btc": [{"address_type": "p2wsh", "block_height": 1806588, "pointer": 3509, "pt_idx": 1, "satoshi": 3650144, "subaccount": 0, "txhash": "08711d45d4867d7834b133a425da065b252eb6a9b206d57e2bbb226a344c5d13", "is_internal": false}, {"address_type": "p2wsh", "block_height": 1835681, "pointer": 3510, "pt_idx": 0, "satoshi": 5589415, "subaccount": 0, "txhash": "fbd00e5b9e8152c04214c72c791a78a65fdbab68b5c6164ff0d8b22a006c5221", "is_internal": false}, {"address_type": "p2wsh", "block_height": 1835821, "pointer": 3511, "pt_idx": 0, "satoshi": 568158, "subaccount": 0, "txhash": "e5b358fb8366960130b97794062718d7f4fbe721bf274f47493a19326099b811", "is_internal": false}]}"#;
+        let json_str = r#"{"btc": [{"address_type": "p2wsh", "block_height": 1806588, "pointer": 3509, "pt_idx": 1, "satoshi": 3650144, "subaccount": 0, "txhash": "08711d45d4867d7834b133a425da065b252eb6a9b206d57e2bbb226a344c5d13", "is_internal": false, "confidential": false}, {"address_type": "p2wsh", "block_height": 1835681, "pointer": 3510, "pt_idx": 0, "satoshi": 5589415, "subaccount": 0, "txhash": "fbd00e5b9e8152c04214c72c791a78a65fdbab68b5c6164ff0d8b22a006c5221", "is_internal": false, "confidential": false}, {"address_type": "p2wsh", "block_height": 1835821, "pointer": 3511, "pt_idx": 0, "satoshi": 568158, "subaccount": 0, "txhash": "e5b358fb8366960130b97794062718d7f4fbe721bf274f47493a19326099b811", "is_internal": false, "confidential": false}]}"#;
         let json: GetUnspentOutputs = serde_json::from_str(json_str).unwrap();
         println!("{:#?}", json);
     }

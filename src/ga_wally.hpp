@@ -146,7 +146,7 @@ namespace sdk {
 
     std::vector<unsigned char> scriptpubkey_p2sh_from_hash160(byte_span_t hash);
 
-    std::vector<unsigned char> witness_program_from_bytes(byte_span_t script, uint32_t flags);
+    std::vector<unsigned char> witness_program_from_bytes(byte_span_t script, uint32_t witness_ver, uint32_t flags);
 
     std::array<unsigned char, SHA256_LEN> format_bitcoin_message_hash(byte_span_t message);
 
@@ -213,7 +213,9 @@ namespace sdk {
     // Returns true if 'hex' decodes correctly to 'len' bytes
     bool validate_hex(const std::string& hex, size_t len);
 
-    std::vector<unsigned char> addr_segwit_v0_to_bytes(const std::string& addr, const std::string& family);
+    std::vector<unsigned char> addr_segwit_to_bytes(const std::string& addr, const std::string& family);
+
+    size_t addr_segwit_get_version(const std::string& addr, const std::string& family);
 
     std::string public_key_to_p2pkh_addr(unsigned char btc_version, byte_span_t public_key);
 
@@ -333,6 +335,7 @@ namespace sdk {
     wally_tx_ptr tx_init(uint32_t locktime, size_t inputs_allocation_len, size_t outputs_allocation_len = 2,
         uint32_t version = WALLY_TX_VERSION_2);
 
+    wally_tx_ptr tx_from_bin(byte_span_t tx_bin, uint32_t flags = WALLY_TX_FLAG_USE_WITNESS);
     wally_tx_ptr tx_from_hex(const std::string& tx_hex, uint32_t flags = WALLY_TX_FLAG_USE_WITNESS);
 
     void tx_add_raw_input(const wally_tx_ptr& tx, byte_span_t txhash, uint32_t index, uint32_t sequence,

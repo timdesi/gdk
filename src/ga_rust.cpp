@@ -12,8 +12,10 @@
 #include "ga_rust.hpp"
 #include "ga_strings.hpp"
 #include "ga_tor.hpp"
+#include "inbuilt.hpp"
 #include "logging.hpp"
 #include "session.hpp"
+#include "signer.hpp"
 #include "utils.hpp"
 
 namespace ga {
@@ -58,13 +60,10 @@ namespace sdk {
         }
     } // namespace
 
-    ga_rust::ga_rust(const nlohmann::json& net_params, nlohmann::json& defaults)
-        : session_impl(net_params, defaults)
+    ga_rust::ga_rust(network_parameters&& net_params)
+        : session_impl(std::move(net_params))
     {
-        nlohmann::json network(m_net_params.get_json());
-        network["proxy"] = net_params.value("proxy", std::string{});
-        network["state_dir"] = gdk_config().value("datadir", std::string{}) + "/state";
-        const auto res = GDKRUST_create_session(&m_session, network.dump().c_str());
+        const auto res = GDKRUST_create_session(&m_session, m_net_params.get_json().dump().c_str());
         GDK_RUNTIME_ASSERT(res == GA_OK);
     }
 
@@ -166,7 +165,27 @@ namespace sdk {
 
     nlohmann::json ga_rust::refresh_assets(const nlohmann::json& params)
     {
-        return call_session("refresh_assets", params);
+        auto result = call_session("refresh_assets", params);
+        const std::array<const char*, 2> keys = { "assets", "icons" };
+        for (const auto& key : keys) {
+            if (params.value(key, false)) {
+                auto& data = result.at(key);
+                if (data.empty()) {
+                    // An empty result is a sentinel indicating that the initial
+                    // data fetch failed. Return the compiled-in data in this case.
+                    result[key] = get_inbuilt_data(m_net_params, key).at("body");
+                } else {
+                    // Filter out any bad keys returned by the asset registry
+                    json_filter_bad_asset_ids(data);
+                }
+            }
+        }
+        if (params.value("assets", false)) {
+            // Add the policy asset to asset data
+            const auto policy_asset = m_net_params.policy_asset();
+            result["assets"][policy_asset] = { { "asset_id", policy_asset }, { "name", "btc" } };
+        }
+        return result;
     }
 
     nlohmann::json ga_rust::validate_asset_domain_name(const nlohmann::json& params) { return nlohmann::json(); }
@@ -409,10 +428,10 @@ namespace sdk {
         throw std::runtime_error("set_unspent_outputs_status not implemented");
     }
 
-    nlohmann::json ga_rust::get_transaction_details(const std::string& txhash_hex) const
+    wally_tx_ptr ga_rust::get_raw_transaction_details(const std::string& txhash_hex) const
     {
-        auto details = nlohmann::json(txhash_hex);
-        return call_session("get_transaction_details", details);
+        const auto tx_hex = call_session("get_raw_transaction_details", nlohmann::json(txhash_hex));
+        return tx_from_hex(tx_hex, tx_flags(m_net_params.is_liquid()));
     }
 
     nlohmann::json ga_rust::create_transaction(const nlohmann::json& details)
@@ -561,8 +580,6 @@ namespace sdk {
     {
         throw std::runtime_error("upload_confidential_addresses not yet implemented");
     }
-
-    void ga_rust::set_local_encryption_keys(const pub_key_t& public_key, std::shared_ptr<signer> signer) {}
 
     void ga_rust::disable_all_pin_logins() {}
 

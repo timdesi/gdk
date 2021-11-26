@@ -1,5 +1,3 @@
-use std::convert::TryInto;
-
 mod address;
 mod blockhash;
 mod blockheader;
@@ -15,7 +13,6 @@ pub use blockhash::*;
 pub use blockheader::*;
 pub use outpoint::*;
 pub use script::*;
-use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 pub use transaction::*;
 pub use txid::*;
@@ -29,6 +26,7 @@ pub struct UTXOInfo {
     pub script: BEScript,
     pub height: Option<u32>,
     pub path: DerivationPath,
+    pub confidential: bool,
 }
 
 impl UTXOInfo {
@@ -44,6 +42,7 @@ impl UTXOInfo {
             script,
             height,
             path,
+            confidential: false,
         }
     }
 
@@ -53,6 +52,7 @@ impl UTXOInfo {
         script: BEScript,
         height: Option<u32>,
         path: DerivationPath,
+        confidential: bool,
     ) -> Self {
         UTXOInfo {
             asset: asset.to_hex(),
@@ -60,6 +60,7 @@ impl UTXOInfo {
             script,
             height,
             path,
+            confidential,
         }
     }
 
@@ -69,30 +70,6 @@ impl UTXOInfo {
         } else {
             Some(self.asset.parse().expect("Invalid asset"))
         }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Unblinded {
-    pub asset: elements::issuance::AssetId,
-    pub abf: [u8; 32],
-    pub vbf: [u8; 32],
-    pub value: u64,
-}
-
-impl Unblinded {
-    pub fn asset(&self) -> elements::issuance::AssetId {
-        self.asset.clone()
-    }
-
-    pub fn confidential(&self) -> bool {
-        self.abf != [0u8; 32] || self.vbf != [0u8; 32]
-    }
-}
-
-impl Debug for Unblinded {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {}", self.asset.to_hex(), self.value)
     }
 }
 

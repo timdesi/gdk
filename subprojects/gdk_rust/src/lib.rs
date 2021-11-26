@@ -19,7 +19,7 @@ use std::ffi::CString;
 use std::fmt;
 use std::os::raw::c_char;
 use std::sync::Once;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gdk_common::model::{
     CreateAccountOpt, GetNextAccountOpt, GetTransactionsOpt, RenameAccountOpt, SPVVerifyTx,
@@ -28,7 +28,6 @@ use gdk_common::model::{
 use gdk_common::session::Session;
 
 use crate::error::Error;
-use chrono::Utc;
 use gdk_electrum::{ElectrumSession, NativeNotif};
 use log::{LevelFilter, Metadata, Record};
 use std::str::FromStr;
@@ -158,17 +157,17 @@ fn fetch_cached_exchange_rates(sess: &mut GdkSession) -> Option<Vec<Ticker>> {
         debug!("hit exchange rate cache");
     } else {
         info!("missed exchange rate cache");
-        let (agent, is_development) = match sess.backend {
-            GdkBackend::Electrum(ref s) => (s.build_request_agent(), s.network.development),
+        let (agent, is_mainnet) = match sess.backend {
+            GdkBackend::Electrum(ref s) => (s.build_request_agent(), s.network.mainnet),
         };
         if let Ok(agent) = agent {
-            let rates = if is_development {
+            let rates = if is_mainnet {
+                fetch_exchange_rates(agent)
+            } else {
                 vec![Ticker {
                     pair: Pair::new(Currency::BTC, Currency::USD),
                     rate: 1.1,
                 }]
-            } else {
-                fetch_exchange_rates(agent)
             };
             // still record time even if we get no results
             sess.last_xr_fetch = SystemTime::now();
@@ -372,7 +371,7 @@ where
             session.get_transactions(&opt).map(|x| txs_result_value(&x)).map_err(Into::into)
         }
 
-        "get_transaction_details" => get_transaction_details(session, input),
+        "get_raw_transaction_details" => get_raw_transaction_details(session, input),
         "get_balance" => session
             .get_balance(&serde_json::from_value(input.clone())?)
             .map(|v| json!(v))
@@ -499,7 +498,14 @@ impl log::Log for SimpleLogger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            println!("{} {} - {}", Utc::now().format("%S%.3f"), record.level(), record.args());
+            let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards");
+            println!(
+                "{:02}.{:03} {} - {}",
+                ts.as_secs() % 60,
+                ts.subsec_millis(),
+                record.level(),
+                record.args()
+            );
         }
     }
 

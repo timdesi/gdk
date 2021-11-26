@@ -1,4 +1,5 @@
 // Create compressed asset data for pre-caching in gdk
+#include "src/containers.hpp"
 #include "src/ga_auth_handlers.hpp"
 #include "src/ga_session.hpp"
 #include "src/session.hpp"
@@ -29,7 +30,7 @@ static nlohmann::json process_auth(sdk::auth_handler& handler)
 static std::string get_code(const std::string& name, const std::vector<uint8_t>& compressed, const std::string& modified)
 {
     std::ostringstream os;
-    os << "extern const std::string inbuilt_" << name << "_modified{\""  << modified << "\"};\n\n";
+    os << "static const std::string inbuilt_" << name << "_modified{\""  << modified << "\"};\n\n";
     os << std::setfill('0');
     os << "static const uint8_t inbuilt_" << name << "[" << compressed.size() << "] = {" << std::hex;
     for (size_t i = 0; i < compressed.size(); ++i) {
@@ -48,6 +49,7 @@ static std::string generate(sdk::session& session, const std::string& page, cons
     const auto url = session.get_network_parameters().get_registry_connection_string() + "/" + page + ".json";
     auto data = session.http_request({ { "method", "GET" }, { "urls", { url } }, { "accept", "json" } });
     data.at("headers").erase("date"); // Make the generated data reproducible
+    ::ga::sdk::json_filter_bad_asset_ids(data.at("body")); // Remove any bad keys
 
 #if 0 // Enable to mutate the generated asset data so patching can be tested
     if (key == "assets") {

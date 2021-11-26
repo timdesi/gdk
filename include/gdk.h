@@ -120,6 +120,21 @@ GDK_API int GA_reconnect_hint(struct GA_session* session, const GA_json* hint);
 GDK_API int GA_get_tor_socks5(struct GA_session* session, char** socks5);
 
 /**
+ * Compute a hashed wallet identifier from a BIP32 xpub or mnemonic.
+ *
+ * The identifier returned is computed from the network combined with the
+ * master chain code and public key of the xpub/mnemonic. It can be used
+ * as a unique wallet identifier to mitigate privacy risks associated with
+ * storing the wallet's xpub.
+ *
+ * :param net_params: The :ref:`net-params` of the network to compute an identifier for.
+ * :param params: The :ref:`wallet-id-request` to compute an identifier for.
+ * :param output: Destination for the output JSON.
+ *|     Returned GA_json should be freed using `GA_destroy_json`.
+ */
+GDK_API int GA_get_wallet_identifier(const GA_json* net_params, const GA_json* params, GA_json** output);
+
+/**
  * Make a request to an http server.
  *
  * :param session: The session to use.
@@ -390,8 +405,12 @@ GDK_API int GA_set_pin(
     struct GA_session* session, const char* mnemonic, const char* pin, const char* device_id, GA_json** pin_data);
 
 /**
- * Disable all PIN logins previously set. After calling this method, user will not be able to
- *|    login with PIN from any device he previously paired.
+ * Disable all PIN logins previously set.
+ *
+ * After calling this method, the user will not be able to login with PIN
+ *| from any device that was previously enabled using `GA_set_pin`.
+ *
+ * :param session: The session to use.
  */
 GDK_API int GA_disable_all_pin_logins(struct GA_session* session);
 
@@ -558,7 +577,7 @@ GDK_API int GA_ack_system_message(struct GA_session* session, const char* messag
  * Get the two factor configuration for the current user.
  *
  * :param session: The session to use.
- * :param config: Destination for the returned :ref:`configuration`.
+ * :param config: Destination for the returned :ref:`twofactor_configuration`.
  *|     Returned GA_json should be freed using `GA_destroy_json`.
  */
 GDK_API int GA_get_twofactor_config(struct GA_session* session, GA_json** config);
@@ -722,6 +741,9 @@ GDK_API int GA_change_settings_twofactor(
 /**
  * Request to begin the two factor authentication reset process.
  *
+ * Returns the ``"twofactor_reset"`` portion of :ref:`twofactor_configuration` in
+ * the GA_auth_handler result.
+ *
  * :param session: The session to use.
  * :param email: The new email address to enable once the reset waiting period expires.
  * :param is_dispute: GA_TRUE if the reset request is disputed, GA_FALSE otherwise.
@@ -734,20 +756,28 @@ GDK_API int GA_twofactor_reset(
 /**
  * Undo a request to begin the two factor authentication reset process.
  *
+ * Returns the ``"twofactor_reset"`` portion of :ref:`twofactor_configuration` in
+ * the GA_auth_handler result.
+ *
  * :param session: The session to use.
  * :param email: The email address to cancel the reset request for. Must be
  *|     the email previously passed to `GA_twofactor_reset`.
  * :param call: Destination for the resulting GA_auth_handler to request the reset.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
  *
- * .. note:: Unlike`GA_twofactor_cancel_reset`, this call only removes the reset
+ * .. note:: Unlike `GA_twofactor_cancel_reset`, this call only removes the reset
  *|     request associated with the given email. If other emails have requested
  *|     a reset, the wallet will still remain locked following this call.
  */
 GDK_API int GA_twofactor_undo_reset(struct GA_session* session, const char* email, struct GA_auth_handler** call);
 
 /**
- * Cancel all outstanding two factor resets and unlock the wallet for normal operation.
+ * Cancel all two factor reset requests and unlock the wallet for normal operation.
+ *
+ * This call requires authentication using an existing wallet twofactor method.
+ *
+ * Returns the ``"twofactor_reset"`` portion of :ref:`twofactor_configuration` in
+ * the GA_auth_handler result.
  *
  * :param session: The session to use.
  * :param call: Destination for the resulting GA_auth_handler to cancel the reset.

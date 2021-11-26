@@ -16,6 +16,7 @@ cpp_headers = [
            'ga_tx.hpp',
            'gsl_wrapper.hpp',
            'http_client.hpp',
+           'inbuilt.hpp',
            'logging.hpp',
            'memory.hpp',
            'network_parameters.hpp',
@@ -25,7 +26,6 @@ cpp_headers = [
            'sqlite3/sqlite3.h',
            'threading.hpp',
            'transaction_utils.hpp',
-           'tx_list_cache.hpp',
            'utils.hpp',
            'xpub_hdkey.hpp']
 
@@ -45,6 +45,7 @@ cpp_sources = [
            'ga_tx.cpp',
            'ga_wally.cpp',
            'http_client.cpp',
+           'inbuilt.cpp',
            'network_parameters.cpp',
            'session.cpp',
            'session_impl.cpp',
@@ -52,7 +53,6 @@ cpp_sources = [
            'socks_client.cpp',
            'sqlite3/sqlite3.c',
            'transaction_utils.cpp',
-           'tx_list_cache.cpp',
            'utils.cpp',
            'xpub_hdkey.cpp']
 

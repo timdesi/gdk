@@ -19,7 +19,10 @@ namespace sdk {
         static nlohmann::json get_all();
         static nlohmann::json get(const std::string& name);
 
+        // Construct from raw network json
         explicit network_parameters(const nlohmann::json& details);
+        // Construct from a user's overrides and raw network json
+        network_parameters(const nlohmann::json& user_overrides, nlohmann::json& defaults);
 
         ~network_parameters();
 
@@ -65,6 +68,9 @@ namespace sdk {
         std::string get_registry_connection_string() const;
         bool is_tls_connection() const;
         std::vector<uint32_t> csv_buckets() const;
+        uint32_t cert_expiry_threshold() const;
+        uint32_t get_max_reorg_blocks() const;
+        uint32_t get_taproot_enabled_at() const;
 
     private:
         nlohmann::json m_details;

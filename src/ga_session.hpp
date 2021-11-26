@@ -10,17 +10,15 @@
 
 #include "amount.hpp"
 #include "client_blob.hpp"
-#include "ga_cache.hpp"
 #include "ga_wally.hpp"
 #include "session_impl.hpp"
-#include "signer.hpp"
 #include "threading.hpp"
-#include "tx_list_cache.hpp"
 
 using namespace std::literals;
 
 namespace ga {
 namespace sdk {
+    struct cache;
     struct websocketpp_gdk_config;
     struct websocketpp_gdk_tls_config;
     struct tor_controller;
@@ -38,10 +36,10 @@ namespace sdk {
         using heartbeat_t = websocketpp::pong_timeout_handler;
         using nlocktime_t = std::map<std::string, nlohmann::json>; // txhash:pt_idx -> lock info
 
-        ga_session(const nlohmann::json& net_params, nlohmann::json& defaults);
+        explicit ga_session(network_parameters&& net_params);
         ~ga_session();
 
-        void register_user(const std::string& master_pub_key_hex, const std::string& master_chain_code_hex,
+        nlohmann::json register_user(const std::string& master_pub_key_hex, const std::string& master_chain_code_hex,
             const std::string& gait_path_hex, bool supports_csv);
 
         void connect();
@@ -73,8 +71,6 @@ namespace sdk {
         template <typename T>
         void change_settings(const std::string& key, const T& value, const nlohmann::json& twofactor_data);
         void change_settings_limits(const nlohmann::json& details, const nlohmann::json& twofactor_data);
-
-        nlohmann::json get_transactions(const nlohmann::json& details);
 
         nlohmann::json get_subaccounts();
         nlohmann::json get_subaccount(uint32_t subaccount);
@@ -121,14 +117,12 @@ namespace sdk {
         nlohmann::json set_pin(const std::string& mnemonic, const std::string& pin, const std::string& device_id);
         void disable_all_pin_logins();
 
-        bool get_uncached_blinding_nonces(const nlohmann::json& details, nlohmann::json& twofactor_data);
         nlohmann::json get_unspent_outputs(const nlohmann::json& details, unique_pubkeys_and_scripts_t& missing);
         void process_unspent_outputs(nlohmann::json& utxos);
         nlohmann::json get_unspent_outputs_for_private_key(
             const std::string& private_key, const std::string& password, uint32_t unused);
         nlohmann::json set_unspent_outputs_status(const nlohmann::json& details, const nlohmann::json& twofactor_data);
-        nlohmann::json get_transaction_details(const std::string& txhash) const;
-        tx_list_cache::container_type get_raw_transactions(uint32_t subaccount, uint32_t first, uint32_t count);
+        wally_tx_ptr get_raw_transaction_details(const std::string& txhash_hex) const;
 
         nlohmann::json create_transaction(const nlohmann::json& details);
         nlohmann::json sign_transaction(const nlohmann::json& details);
@@ -185,9 +179,15 @@ namespace sdk {
 
         void encache_signer_xpubs(std::shared_ptr<signer> signer);
 
+        nlohmann::json sync_transactions(uint32_t subaccount, unique_pubkeys_and_scripts_t& missing);
+        void store_transactions(uint32_t subaccount, nlohmann::json& txs);
+        void postprocess_transactions(nlohmann::json& tx_list);
+        nlohmann::json get_transactions(const nlohmann::json& details);
+
     private:
         void reset_cached_session_data(locker_t& locker);
-        void reset_all_session_data();
+        void delete_reorg_block_txs(locker_t& locker, bool from_latest_cached);
+        void reset_all_session_data(bool in_dtor);
 
         bool is_connected() const;
         bool reconnect();
@@ -207,8 +207,10 @@ namespace sdk {
         const std::string& get_default_address_type(uint32_t) const;
         void push_appearance_to_server(locker_t& locker) const;
         void set_twofactor_config(locker_t& locker, const nlohmann::json& config);
+        bool is_twofactor_reset_active(session_impl::locker_t& locker);
+        nlohmann::json set_twofactor_reset_config(const autobahn::wamp_call_result& server_result);
         void set_enabled_twofactor_methods(locker_t& locker);
-        void update_login_data(locker_t& locker, nlohmann::json& login_data, const std::string& root_bip32_xpub,
+        nlohmann::json on_post_login(locker_t& locker, nlohmann::json& login_data, const std::string& root_bip32_xpub,
             bool watch_only, bool is_initial_login);
         void update_fiat_rate(locker_t& locker, const std::string& rate_str);
         void update_spending_limits(locker_t& locker, const nlohmann::json& limits);
@@ -216,17 +218,15 @@ namespace sdk {
         nlohmann::json convert_amount(locker_t& locker, const nlohmann::json& amount_json) const;
         nlohmann::json convert_fiat_cents(locker_t& locker, amount::value_type fiat_cents) const;
         nlohmann::json get_settings(locker_t& locker);
-        bool unblind_utxo(nlohmann::json& utxo, const std::string& for_txhash, unique_pubkeys_and_scripts_t& missing);
-        bool cleanup_utxos(nlohmann::json& utxos, const std::string& for_txhash, unique_pubkeys_and_scripts_t& missing);
-        tx_list_cache::container_type get_tx_list(session_impl::locker_t& locker, uint32_t subaccount, uint32_t page_id,
-            const std::string& start_date, const std::string& end_date);
-
-        autobahn::wamp_subscription subscribe(
-            locker_t& locker, const std::string& topic, const autobahn::wamp_event_handler& callback);
+        bool unblind_utxo(locker_t& locker, nlohmann::json& utxo, const std::string& for_txhash,
+            unique_pubkeys_and_scripts_t& missing);
+        bool cleanup_utxos(session_impl::locker_t& locker, nlohmann::json& utxos, const std::string& for_txhash,
+            unique_pubkeys_and_scripts_t& missing);
 
         std::unique_ptr<locker_t> get_multi_call_locker(uint32_t category_flags, bool wait_for_lock);
         void on_new_transaction(const std::vector<uint32_t>& subaccounts, nlohmann::json details);
-        void on_new_block(nlohmann::json details);
+        void on_new_block(nlohmann::json details, bool is_relogin);
+        void on_new_block(locker_t& locker, nlohmann::json details, bool is_relogin);
         void on_new_tickers(nlohmann::json details);
         void change_settings_pricing_source(locker_t& locker, const std::string& currency, const std::string& exchange);
 
@@ -245,9 +245,8 @@ namespace sdk {
         nlohmann::json refresh_http_data(const std::string& page, const std::string& key, bool refresh);
 
         void update_address_info(nlohmann::json& address, bool is_historic);
-        std::shared_ptr<nlocktime_t> update_nlocktime_info();
+        std::shared_ptr<nlocktime_t> update_nlocktime_info(session_impl::locker_t& locker);
 
-        void set_local_encryption_keys(locker_t& locker, const pub_key_t& public_key, std::shared_ptr<signer> signer);
         void save_cache();
 
         context_ptr tls_init_handler_impl(
@@ -261,6 +260,10 @@ namespace sdk {
         void set_socket_options();
         void start_ping_timer();
         void disconnect();
+
+        autobahn::wamp_subscription subscribe(
+            locker_t& locker, const std::string& topic, const autobahn::wamp_event_handler& callback);
+        void subscribe_all(locker_t& locker);
         void unsubscribe();
 
         // Make a background WAMP call and return its result to the current thread.
@@ -331,23 +334,22 @@ namespace sdk {
         uint32_t m_next_subaccount;
         std::vector<uint32_t> m_fee_estimates;
         std::chrono::system_clock::time_point m_fee_estimates_ts;
-        uint32_t m_block_height;
 
         uint32_t m_system_message_id; // Next system message
         uint32_t m_system_message_ack_id; // Currently returned message id to ack
         std::string m_system_message_ack; // Currently returned message to ack
         bool m_watch_only;
-        bool m_is_locked;
         std::vector<std::string> m_tx_notifications;
         std::chrono::system_clock::time_point m_tx_last_notification;
+        nlohmann::json m_last_block_notification;
 
         uint32_t m_multi_call_category;
-        tx_list_caches m_tx_list_caches;
         std::shared_ptr<nlocktime_t> m_nlocktimes;
 
         std::shared_ptr<tor_controller> m_tor_ctrl;
         std::string m_last_tor_socks5;
-        cache m_cache;
+        std::shared_ptr<cache> m_cache;
+        std::set<uint32_t> m_synced_subaccounts;
         const std::string m_user_agent;
 
         autobahn::wamp_call_options m_wamp_call_options;

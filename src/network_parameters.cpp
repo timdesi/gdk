@@ -5,6 +5,7 @@
 #include "containers.hpp"
 #include "exception.hpp"
 #include "network_parameters.hpp"
+#include "session.hpp" // TODO: gdk_config() doesn't belong in session
 
 // TODO: Use std::string_view when its fully supported
 
@@ -168,6 +169,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "electrum_url", "localhost:19002" },
             { "liquid", false },
             { "mainnet", false },
+            { "max_reorg_blocks", 7 * 144u },
             { "name", "Localtest" },
             { "network", "localtest" },
             { "p2pkh_version", 111u },
@@ -178,6 +180,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 0 }, // Enabled
             { "tx_explorer_url", std::string() },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", wamp_cert_roots },
@@ -202,6 +205,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "electrum_url", "blockstream.info:995" },
             { "liquid", true },
             { "mainnet", true },
+            { "max_reorg_blocks", 2 },
             { "name", "Liquid" },
             { "network", "liquid" },
             { "p2pkh_version", 57u },
@@ -213,6 +217,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", "https://blockstream.info/liquid/tx/" },
             { "wamp_cert_pins", wamp_cert_pins },
             { "wamp_cert_roots", wamp_cert_roots },
@@ -237,6 +242,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "electrum_url", "localhost:50001" },
             { "liquid", true },
             { "mainnet", false },
+            { "max_reorg_blocks", 2 },
             { "name", "Localtest Liquid" },
             { "network", "localtest-liquid" },
             { "p2pkh_version", 235u },
@@ -248,6 +254,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", std::string() },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", wamp_cert_roots },
@@ -259,30 +266,32 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
         std::make_shared<nlohmann::json>(nlohmann::json({
             { "address_explorer_url", "https://esplora.blockstream.com/liquidtestnet/address/" },
             { "asset_registry_onion_url", "http://lhquhzzpzg5tyymcqep24fynpzzqqg3m3rlh7ascnw5cpqsro35bfxyd.onion/testnet/" },
-            { "asset_registry_url", "https://assets.blockstream.info/testnet/" },
-            { "bech32_prefix", "ert" },
+            { "asset_registry_url", "https://assets-testnet.blockstream.info/" },
+            { "bech32_prefix", "tex" },
             { "bip21_prefix", "liquidtestnet" },
-            { "blech32_prefix", "el" },
-            { "blinded_prefix", 4u },
+            { "blech32_prefix", "tlq" },
+            { "blinded_prefix", 23u },
             { "csv_buckets", std::vector<uint32_t>{ 1440, 65535 } },
             { "ct_bits", 52 },
             { "ct_exponent", 0 },
             { "development", false },
-            { "electrum_tls", false },
+            { "electrum_tls", true },
             { "electrum_url", "blockstream.info:465" },
             { "liquid", true },
             { "mainnet", false },
+            { "max_reorg_blocks", 2 },
             { "name", "Testnet Liquid" },
             { "network", "testnet-liquid" },
-            { "p2pkh_version", 235u },
-            { "p2sh_version", 75u },
-            { "policy_asset", "5d8629bf58c7f98e90e171a81058ce543418f0dc16e8459367773552b067f3f3" },
+            { "p2pkh_version", 36u },
+            { "p2sh_version", 19u },
+            { "policy_asset", "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49" },
             { "server_type", "green" },
             { "service_chain_code", "c660eec6d9c536f4121854146da22e02d4c91d72af004d41729b9a592f0788e5" },
             { "service_pubkey", "02c47d84a5b256ee3c29df89642d14b6ed73d17a2b8af0aca18f6f1900f1633533" },
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", "https://esplora.blockstream.com/liquidtestnet/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", wamp_cert_roots },
@@ -301,6 +310,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "electrum_url", "blockstream.info:700" },
             { "liquid", false },
             { "mainnet", true },
+            { "max_reorg_blocks", 144u },
             { "name", "Bitcoin" },
             { "network", "mainnet" },
             { "p2pkh_version", 0u },
@@ -311,6 +321,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 709776 }, // 144 Blocks following activation
             { "tx_explorer_url", "https://blockstream.info/tx/" },
             { "wamp_cert_pins", wamp_cert_pins },
             { "wamp_cert_roots", wamp_cert_roots },
@@ -329,6 +340,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "electrum_url", "blockstream.info:993" },
             { "liquid", false },
             { "mainnet", false },
+            { "max_reorg_blocks", 7 * 144u },
             { "name", "Testnet" },
             { "network", "testnet" },
             { "p2pkh_version", 111u },
@@ -339,6 +351,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 0 }, // Enabled
             { "tx_explorer_url", "https://blockstream.info/testnet/tx/" },
             { "wamp_cert_pins", wamp_cert_pins },
             { "wamp_cert_roots", wamp_cert_roots },
@@ -364,6 +377,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "electrum_url", "blockstream.info:995" },
             { "liquid", true },
             { "mainnet", true },
+            { "max_reorg_blocks", 2 },
             { "name", "Liquid (Electrum)" },
             { "network", "electrum-liquid" },
             { "p2pkh_version", 57u },
@@ -375,6 +389,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", "https://blockstream.info/liquid/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", nlohmann::json::array() },
@@ -399,6 +414,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "electrum_url", "localhost:50001" },
             { "liquid", true },
             { "mainnet", false },
+            { "max_reorg_blocks", 2 },
             { "name", "Localtest Liquid (Electrum)" },
             { "network", "electrum-localtest-liquid" },
             { "p2pkh_version", 235u },
@@ -410,6 +426,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", std::string() },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", nlohmann::json::array() },
@@ -428,6 +445,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "electrum_url", "blockstream.info:700" },
             { "liquid", false },
             { "mainnet", true },
+            { "max_reorg_blocks", 144u },
             { "name", "Bitcoin (Electrum)" },
             { "network", "electrum-mainnet" },
             { "p2pkh_version", 0u },
@@ -438,6 +456,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 709776 }, // 144 Blocks following activation
             { "tx_explorer_url", "https://blockstream.info/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", nlohmann::json::array() },
@@ -456,6 +475,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "electrum_url", "blockstream.info:993" },
             { "liquid", false },
             { "mainnet", false },
+            { "max_reorg_blocks", 7 * 144u },
             { "name", "Testnet (Electrum)" },
             { "network", "electrum-testnet" },
             { "p2pkh_version", 111u },
@@ -466,6 +486,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 0 }, // Enabled
             { "tx_explorer_url", "https://blockstream.info/testnet/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", nlohmann::json::array() },
@@ -484,6 +505,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "electrum_url", "localhost:50001" },
             { "liquid", false },
             { "mainnet", false },
+            { "max_reorg_blocks", 7 * 144u },
             { "name", "Localtest (Electrum)" },
             { "network", "electrum-localtest" },
             { "p2pkh_version", 111u },
@@ -494,6 +516,7 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 0 }, // Enabled
             { "tx_explorer_url", "http://127.0.0.1:8080/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", nlohmann::json::array() },
@@ -505,30 +528,32 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
         std::make_shared<nlohmann::json>(nlohmann::json({
             { "address_explorer_url", "https://blockstream.info/liquidtestnet/address/" },
             { "asset_registry_onion_url", "http://lhquhzzpzg5tyymcqep24fynpzzqqg3m3rlh7ascnw5cpqsro35bfxyd.onion/testnet/" },
-            { "asset_registry_url", "https://assets.blockstream.info/testnet/" },
-            { "bech32_prefix", "ert" },
+            { "asset_registry_url", "https://assets-testnet.blockstream.info/" },
+            { "bech32_prefix", "tex" },
             { "bip21_prefix", "liquidtestnet" },
-            { "blech32_prefix", "el" },
-            { "blinded_prefix", 4u },
+            { "blech32_prefix", "tlq" },
+            { "blinded_prefix", 23u },
             { "csv_buckets", std::vector<uint32_t>() },
             { "ct_bits", 52 },
             { "ct_exponent", 0 },
             { "development", false },
-            { "electrum_tls", false },
+            { "electrum_tls", true },
             { "electrum_url", "blockstream.info:465" },
             { "liquid", true },
             { "mainnet", false },
+            { "max_reorg_blocks", 2 },
             { "name", "Testnet Liquid (Electrum)" },
             { "network", "electrum-testnet-liquid" },
-            { "p2pkh_version", 57u },
-            { "p2sh_version", 39u },
-            { "policy_asset", "5d8629bf58c7f98e90e171a81058ce543418f0dc16e8459367773552b067f3f3" },
+            { "p2pkh_version", 36u },
+            { "p2sh_version", 19u },
+            { "policy_asset", "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49" },
             { "server_type", "electrum" },
             { "service_chain_code", std::string() },
             { "service_pubkey", std::string() },
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
+            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", "https://blockstream.info/liquidtestnet/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", nlohmann::json::array() },
@@ -544,9 +569,39 @@ static std::mutex registered_networks_mutex;
 
 namespace ga {
 namespace sdk {
+    namespace {
+        template <typename T>
+        static void set_override(nlohmann::json& ret, const std::string& key, const nlohmann::json& src, T default_)
+        {
+            // Use the users provided value, else the registered value, else `default_`
+            ret[key] = src.value(key, ret.value(key, default_));
+        }
+
+        static auto get_network_overrides(const nlohmann::json& user_overrides, nlohmann::json& defaults)
+        {
+            // Set override-able settings from the users parameters
+            set_override(defaults, "electrum_tls", user_overrides, false);
+            set_override(defaults, "electrum_url", user_overrides, std::string());
+            set_override(defaults, "log_level", user_overrides, "none");
+            set_override(defaults, "spv_multi", user_overrides, false);
+            set_override(defaults, "spv_servers", user_overrides, nlohmann::json::array());
+            set_override(defaults, "spv_enabled", user_overrides, false);
+            set_override(defaults, "use_tor", user_overrides, false);
+            set_override(defaults, "user_agent", user_overrides, std::string());
+            set_override(defaults, "cert_expiry_threshold", user_overrides, 1);
+            set_override(defaults, "proxy", user_overrides, std::string());
+            defaults["state_dir"] = gdk_config().value("datadir", std::string{}) + "/state";
+            return defaults;
+        }
+    } // namespace
 
     network_parameters::network_parameters(const nlohmann::json& details)
         : m_details(details)
+    {
+    }
+
+    network_parameters::network_parameters(const nlohmann::json& user_overrides, nlohmann::json& defaults)
+        : m_details(get_network_overrides(user_overrides, defaults))
     {
     }
 
@@ -645,6 +700,17 @@ namespace sdk {
         return boost::algorithm::starts_with(get_connection_string(), "wss://");
     }
     std::vector<uint32_t> network_parameters::csv_buckets() const { return m_details.at("csv_buckets"); }
-
+    uint32_t network_parameters::cert_expiry_threshold() const { return m_details.at("cert_expiry_threshold"); }
+    // max_reorg_blocks indicates the maximum number of blocks that gdk will expect to re-org on-chain.
+    // In the event that a re-org is larger than this value, AND the user has a tx re-orged in a block
+    // older than the current tip minus max_reorg_blocks, cached data may become out of date and will
+    // need to be removed. The values chosen are designed to make this scenario extremely unlikely:
+    // Liquid does not have re-orgs beyond possibly the tip so is set to 2 blocks.
+    // BTC mainnet is set to one day (144 blocks), more than 2x the largest ever (53 block) re-org seen.
+    // BTC testnet/regtest are set to one week (7 * 144 blocks), this allows regtest test runs under
+    // a weeks worth of blocks without cache deletion, and for testnet still allows cache finalization
+    // testing while being unnaffected by normal chain operation.
+    uint32_t network_parameters::get_max_reorg_blocks() const { return m_details.at("max_reorg_blocks"); }
+    uint32_t network_parameters::get_taproot_enabled_at() const { return m_details.at("taproot_enabled_at"); }
 } // namespace sdk
 } // namespace ga
