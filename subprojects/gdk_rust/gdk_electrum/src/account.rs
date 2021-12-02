@@ -1383,8 +1383,8 @@ pub fn create_pset(account: &Account, request: &CreatePset) -> Result<PsetMeta, 
 
 fn verify_recv_output(
     account: &Account,
-    output: &elements::pset::Output,
-    expected_asset: &elements::AssetId,
+    output: &elements_pset::pset::Output,
+    expected_asset: &elements_pset::AssetId,
     expected_value: u64,
 ) -> Result<(), Error> {
     let store_read = account.store.read().unwrap();
@@ -1398,7 +1398,10 @@ fn verify_recv_output(
         account.master_blinding.as_ref().unwrap(),
         &script,
     );
-    let unblinded = output.to_txout().unblind(&EC, blinding_key)?;
+    let unblinded = output
+        .to_txout()
+        .unblind(&EC, blinding_key)
+        .map_err(|_| Error::Generic("unblind failed".into()))?;
 
     if *expected_asset != unblinded.asset {
         return Err(Error::Generic("unexpected asset".to_owned()));
@@ -1410,7 +1413,7 @@ fn verify_recv_output(
 }
 
 pub fn sign_pset(account: &Account, request: &SignPset) -> Result<SignedPsetMeta, Error> {
-    let (send_asset, recv_asset) = verify_pset_request_amounts(
+    let (send_asset, _recv_asset) = verify_pset_request_amounts(
         account,
         &request.send_asset,
         request.send_amount,
@@ -1420,15 +1423,17 @@ pub fn sign_pset(account: &Account, request: &SignPset) -> Result<SignedPsetMeta
 
     let pset = base64::decode(&request.pset)
         .map_err(|_| Error::Generic("invalid base64 encoding".into()))?;
-    let mut pset =
-        elements::encode::deserialize::<elements::pset::PartiallySignedTransaction>(&pset)
-            .map_err(|e| Error::Generic(format!("invalid PSET: {}", e)))?;
+    let mut pset = elements_pset::encode::deserialize::<
+        elements_pset::pset::PartiallySignedTransaction,
+    >(&pset)
+    .map_err(|e| Error::Generic(format!("invalid PSET: {}", e)))?;
 
     let tx = pset
         .extract_tx()
         .map_err(|e| Error::Generic(format!("extracting transaction failed: {}", e)))?;
-    let tx = elements::encode::deserialize(&elements::encode::serialize(&tx))?;
+    let tx = elements::encode::deserialize(&elements_pset::encode::serialize(&tx))?;
 
+    let recv_asset = elements_pset::AssetId::from_str(&request.recv_asset).unwrap();
     pset.outputs
         .iter()
         .find(|output| {
@@ -1472,7 +1477,8 @@ pub fn sign_pset(account: &Account, request: &SignPset) -> Result<SignedPsetMeta
                 account.script_type,
             );
             let script_sig =
-                elements::encode::deserialize(&elements::encode::serialize(&script_sig)).unwrap();
+                elements_pset::encode::deserialize(&elements::encode::serialize(&script_sig))
+                    .unwrap();
             input.final_script_sig = Some(script_sig);
             input.final_script_witness = Some(witness);
         }
@@ -1485,6 +1491,7 @@ pub fn sign_pset(account: &Account, request: &SignPset) -> Result<SignedPsetMeta
     }
 
     let change_amount = inputs_amount - request.send_amount;
+    let send_asset = elements_pset::AssetId::from_str(&request.send_asset).unwrap();
     if change_amount > 0 {
         pset.outputs
             .iter_mut()
@@ -1492,7 +1499,7 @@ pub fn sign_pset(account: &Account, request: &SignPset) -> Result<SignedPsetMeta
             .ok_or_else(|| Error::Generic("no change output found".to_owned()))?;
     }
 
-    let pset = elements::encode::serialize(&pset);
+    let pset = elements_pset::encode::serialize(&pset);
     Ok(SignedPsetMeta {
         pset: base64::encode(&pset),
     })

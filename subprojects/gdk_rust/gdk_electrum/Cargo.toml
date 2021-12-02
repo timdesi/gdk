@@ -31,6 +31,7 @@ lazy_static = "1.4.0"
 # We need to pin half (transitive dep from serde_cbor) to stay compatible with Rust 1.49.0
 half = "~1.7"
 base64 = "0.13.0"
+elements_pset = { package = "elements", git = "https://github.com/sanket1729/rust-elements", rev = "dc350a0b8664cdd5b051443810a6a1f99a6173da" }
 
 # remember to update secp256k1 deps if increasing this one, unfortunately we can't use the rexported one from bitcoin because we need recovery feature
 bitcoin = { version = "0.27", features = [ "use-serde", "rand" ] }
