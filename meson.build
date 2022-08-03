@@ -1,4 +1,4 @@
-project('gdk', ['c', 'cpp'], version: '0.0.47.post1', meson_version : '>= 0.58.0')
+project('gdk', ['c', 'cpp'], version: '0.0.55', meson_version : '>= 0.58.0')
 
 # commonly used checks
 compiler = meson.get_compiler('cpp')
@@ -14,7 +14,6 @@ freebsd_requires_gold = is_freebsd and is_clang
 use_gold = (build_machine.system() == 'linux' or freebsd_requires_gold) and not cross_win_build and not cross_android_build
 debug_optimized = get_option('buildtype') == 'debugoptimized'
 debug = debug_optimized or get_option('buildtype') == 'debug'
-lto = get_option('lto')
 
 # header checks (must be architecture independent)
 check_headers = [
@@ -38,11 +37,6 @@ add_project_arguments(['-Wno-deprecated-declarations', '-funsigned-char'], langu
 static_libstdc = compiler.has_link_argument('-static-libstdc++')
 
 # language related arguments
-if lto
-    add_project_arguments(['-flto'], language : 'cpp')
-    add_project_link_arguments(['-flto'], language : 'cpp')
-endif
-
 if use_gold
     if is_clang and not is_freebsd and compiler.has_link_argument('-fuse-ld=lld')
         add_project_link_arguments(['-fuse-ld=lld', '-ldl'], language : 'cpp')
@@ -136,9 +130,6 @@ if debug
 else
     add_project_arguments(['-DNDEBUG'], language : ['c', 'cpp'])
 endif
-if get_option('enable-rust')
-    add_project_arguments(['-DBUILD_GDK_RUST'], language : ['c', 'cpp'])
-endif
 
 if meson.is_cross_build()
     archs = meson.get_cross_property('archs')
@@ -179,9 +170,7 @@ if cross_win_build
 endif
 
 sed = find_program('gsed', 'sed')
-if get_option('enable-rust')
-    cargo = find_program('cargo')
-endif
+cargo = find_program('cargo')
 swig = find_program('swig', required : false)
 if swig.found()
     pymodule = import('python')
@@ -207,18 +196,15 @@ if swig.found()
     if python_version != ''
         # FIXME: When making a python module we must avoid linking libpython
         # and allow the interpreter to provide the symbols for manylinux
-        # compatibility.
-        if python_installation.language_version().version_compare('<=3.9')
-            # Note: Use embed:true to force linking libpython, since we don't
-            # allow missing symbols in our final .so file.
-            python_dep = python_installation.dependency(embed:true)
-        else
-            # Work around for https://github.com/mesonbuild/meson/issues/5629
-            python_dep = dependency('python-@0@-embed'.format(python_version), version: '>=3', required: false)
-        endif
-
+        # compatibility. Currently we use embed because the gdk shared lib
+        # has to be built without unresolved symbols.
+        # Workaround for https://github.com/mesonbuild/meson/issues/5629
+        python_dep = dependency('python-@0@-embed'.format(python_version), version: '>=3', required: false)
         if not python_dep.found()
-            error('Python development dependency not be found, please install python(version)-dev and try again.')
+            python_dep = python_installation.dependency(embed:true)
+            if not python_dep.found()
+                error('Python development dependency not be found, please install python(version)-dev and try again.')
+            endif
         endif
     else
         # Python only needed for reading 'environment_variables' above
@@ -290,10 +276,8 @@ library_deps += compiler.find_library('execinfo', required : is_freebsd)
 subproject_deps = []
 
 wallycore = subproject('libwally-core')
-if get_option('enable-rust')
-    gdkrust = subproject('gdk_rust')
-    subproject_deps += gdkrust.get_variable('gdk_rust_dep')
-endif
+gdkrust = subproject('gdk_rust')
+subproject_deps += gdkrust.get_variable('gdk_rust_dep')
 subproject_deps += wallycore.get_variable('wallycore_dep')
 subproject_deps += dependency('external_autobahn-cpp', fallback : ['autobahn-cpp', 'autobahn_dep'])
 subproject_deps += dependency('external_boost', fallback : ['boost', 'boost_dep'])
@@ -305,10 +289,7 @@ subproject_deps += dependency('external_websocketpp', fallback : ['websocketpp',
 subproject_deps += dependency('external_tor', fallback : ['tor', 'tor_dep'])
 
 # includes
-incdirs = ['.']
-if get_option('enable-rust')
-    incdirs += ['subprojects/gdk_rust']
-endif
+incdirs = ['.', 'subprojects/gdk_rust']
 incdir = include_directories(incdirs)
 
 # builds
@@ -316,10 +297,6 @@ subdirs = ['src']
 foreach n : subdirs
     subdir(n)
 endforeach
-
-executable('make_generated_assets', 'tools/make_generated_assets.cpp',
-           link_with: libga.get_static_lib(),
-           dependencies: dependencies)
 
 if get_option('enable-tests')
     test('test aes_gcm',

@@ -8,8 +8,8 @@ function comma_separate() {
 if [ \( "$3" = "android" \) ]; then
     C_COMPILER=$(ls $NDK_TOOLSDIR/bin/$clangarchname-linux-android*$ANDROID_VERSION-clang)
     CXX_COMPILER=$(ls $NDK_TOOLSDIR/bin/$clangarchname-linux-android*$ANDROID_VERSION-clang++)
-    STRIP="$(ls $NDK_TOOLSDIR/bin/$archfilename-linux-android*-strip)"
-    OBJCOPY="$(ls $NDK_TOOLSDIR/bin/$archfilename-linux-android*-objcopy)"
+    STRIP="$(ls $NDK_TOOLSDIR/bin/llvm-strip)"
+    OBJCOPY="$(ls $NDK_TOOLSDIR/bin/llvm-objcopy)"
     CFLAGS=$(comma_separate "--sysroot=$NDK_TOOLSDIR/sysroot" $SDK_CFLAGS)
     LDFLAGS=$(comma_separate $SDK_LDFLAGS)
     ARCHS="[]"
@@ -17,8 +17,8 @@ if [ \( "$3" = "android" \) ]; then
 elif [ \( "$3" = "iphone" \) -o \( "$3" = "iphonesim" \) ]; then
     C_COMPILER="clang"
     CXX_COMPILER="clang++"
-    CFLAGS=$(comma_separate "-isysroot $IOS_SDK_PATH" "-stdlib=libc++" $SDK_CFLAGS_NO_ARCH "-miphoneos-version-min=11.0" "-fembed-bitcode")
-    LDFLAGS=$(comma_separate "-isysroot $IOS_SDK_PATH" "-stdlib=libc++" $SDK_LDFLAGS "-miphoneos-version-min=11.0")
+    CFLAGS=$(comma_separate $IOS_CFLAGS "-stdlib=libc++")
+    LDFLAGS=$(comma_separate $IOS_LDFLAGS "-stdlib=libc++")
     ARCHS=$(comma_separate $ARCHS)
     HOST_SYSTEM="darwin"
 elif [ \( "$3" = "windows" \) ]; then

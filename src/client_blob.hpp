@@ -29,7 +29,7 @@ namespace sdk {
         void set_user_version(uint64_t version);
         uint64_t get_user_version() const;
 
-        bool set_subaccount_name(uint32_t subaccount, const std::string& name);
+        bool set_subaccount_name(uint32_t subaccount, const std::string& name, const nlohmann::json& xpubs);
         std::string get_subaccount_name(uint32_t subaccount) const;
 
         bool set_subaccount_hidden(uint32_t subaccount, bool is_hidden);
@@ -42,6 +42,10 @@ namespace sdk {
         std::string get_master_blinding_key() const;
         bool is_master_blinding_key_denied() const;
 
+        bool set_wo_data(const std::string& username, const nlohmann::json& xpubs);
+        std::string get_wo_username() const;
+        nlohmann::json get_xpubs() const;
+
         void load(byte_span_t key, byte_span_t data);
         std::pair<std::vector<unsigned char>, std::string> save(byte_span_t key, byte_span_t hmac_key) const;
 
@@ -49,6 +53,8 @@ namespace sdk {
         static std::string compute_hmac(byte_span_t hmac_key, byte_span_t data);
 
     private:
+        bool is_key_encrypted(uint32_t key) const;
+
         nlohmann::json m_data;
     };
 

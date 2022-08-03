@@ -3,13 +3,14 @@ cache:
   paths:
     - subprojects/packagecache/
 
-image: greenaddress/ci@sha256:a777c4526ae84f6f972665aa1c4e7a44c0325883965b58631811066bd8c1a7ee
+image: greenaddress/ci@sha256:6a031d167873f2e305a37de8a89718184b365c29535e62db4293275620d4e803
 
 stages:
   - format
   - build
   - test
   - deploy
+  - publish
 
 .ndk_release:
   tags:
@@ -70,54 +71,59 @@ test_format:
   script:
     - ./tools/format.sh && git diff --exit-code
 
-test_gcc:
-  tags:
-    - ga
-  script:
-    - ./tools/build.sh --gcc --enable-rust
-
-release_py3m_buster:
+release_py3m_bullseye:
   extends: .py_release
   script:
-    - ./tools/build.sh --install $PWD/gdk-python --gcc --python-version 3.7 --enable-rust
+    - NUM_JOBS=16 ./tools/build.sh --install $PWD/gdk-python --gcc --python-version 3.9
 
-release_py3m_buster_debug:
+release_py3m_bullseye_debug:
   extends: .py_release
   when: manual
   script:
-    - ./tools/build.sh --buildtype=debug --install $PWD/gdk-python --gcc --python-version 3.7 --enable-rust
+    - NUM_JOBS=16 ./tools/build.sh --buildtype=debug --install $PWD/gdk-python --gcc --python-version 3.9
 
 release_py3m_ubuntu_18.04:
-  image: greenaddress/ubuntu_ci@sha256:fa4942de35b0cc54817d1ce94e568d13e5a00777b78b94542141099817e1a81f
+  image: greenaddress/ubuntu_ci@sha256:183cfff276003c28c4388bebbbcc977b1e93f8dc85f1dbf2c02881053ad0c46f
   extends: .py_release
   script:
-    - ./tools/build.sh --install $PWD/gdk-python --gcc --python-version 3.6 --enable-rust
+    - NUM_JOBS=16 ./tools/build.sh --install $PWD/gdk-python --gcc --python-version 3.6
 
 release_py3m_osx:
   extends: .py_release
   tags:
-    - osx
+    - osx-ia
   script:
     - cd $CI_PROJECT_DIR
     - python3 -m venv venv
     - source venv/bin/activate
     - pip install -r ./tools/requirements.txt
-    - ./tools/build.sh --install $PWD/gdk-python --clang --python-version 3.9 --enable-rust
+    - NUM_JOBS=16 ./tools/build.sh --install $PWD/gdk-python --clang --python-version 3.9
+
+release_py3m_osx_m1:
+  extends: .py_release
+  tags:
+    - osx-m1
+  script:
+    - cd $CI_PROJECT_DIR
+    - python3 -m venv venv
+    - source venv/bin/activate
+    - pip install -r ./tools/requirements.txt
+    - NUM_JOBS=16 ./tools/build.sh --install $PWD/gdk-python --clang --python-version 3.9
 
 test_fedora_clang:
-  image: greenaddress/fedora_ci@sha256:da48654c02d38c570811fd42b7e2dabc5ac2ca91854982be9544c19b659e8abb
+  image: greenaddress/fedora_ci@sha256:2eb6f59eecc77929e68a8fd50aa1a50bcb394b57df41c3049d976b159ec2abcb
   tags:
     - ga
   script:
     - python3 -m pip install virtualenv
     - python3 -m virtualenv venv && source venv/bin/activate && pip install -r ./tools/requirements.txt
-    - ./tools/build.sh --clang --enable-rust
+    - NUM_JOBS=16 ./tools/build.sh --clang
 
 test_clang:
   tags:
     - ga
   script:
-    - ./tools/build.sh --clang --enable-rust --enable-tests # REVERTME
+    - NUM_JOBS=16 ./tools/build.sh --clang --enable-tests # REVERTME
     - ./build-clang/test_aes_gcm >/dev/null
     - ./build-clang/test_json
     - ./build-clang/test_networks
@@ -126,63 +132,59 @@ gdk_clang_ndk_armeabi-v7a:
   extends: .ndk_release
   script:
     - mkdir gdk-android-jni
-    - JAVA_HOME=/usr/lib/jvm/java-1.11.0-openjdk-amd64 ANDROID_NDK=/android-ndk-r21 ./tools/build.sh --install $PWD/gdk-android-jni --ndk armeabi-v7a --lto=true --enable-rust
+    - NUM_JOBS=16 JAVA_HOME=/usr/lib/jvm/java-1.11.0-openjdk-amd64 ANDROID_NDK=/android-ndk-r23b ./tools/build.sh --install $PWD/gdk-android-jni --ndk armeabi-v7a
 
 gdk_clang_ndk_arm64-v8a:
   extends: .ndk_release
   script:
     - mkdir gdk-android-jni
-    - JAVA_HOME=/usr/lib/jvm/java-1.11.0-openjdk-amd64 ANDROID_NDK=/android-ndk-r21 ./tools/build.sh --install $PWD/gdk-android-jni --ndk arm64-v8a --lto=true --enable-rust
+    - NUM_JOBS=16 JAVA_HOME=/usr/lib/jvm/java-1.11.0-openjdk-amd64 ANDROID_NDK=/android-ndk-r23b ./tools/build.sh --install $PWD/gdk-android-jni --ndk arm64-v8a
 
 gdk_clang_ndk_arm64-v8a-debug:
   extends: .ndk_release
   when: manual
   script:
     - mkdir gdk-android-jni
-    - JAVA_HOME=/usr/lib/jvm/java-1.11.0-openjdk-amd64 ANDROID_NDK=/android-ndk-r21 ./tools/build.sh --buildtype=debug --install $PWD/gdk-android-jni --ndk arm64-v8a --lto=true --enable-rust
+    - NUM_JOBS=16 JAVA_HOME=/usr/lib/jvm/java-1.11.0-openjdk-amd64 ANDROID_NDK=/android-ndk-r23b ./tools/build.sh --buildtype=debug --install $PWD/gdk-android-jni --ndk arm64-v8a
 
 gdk_clang_ndk_x86:
   extends: .ndk_release
   script:
     - mkdir gdk-android-jni
-    - JAVA_HOME=/usr/lib/jvm/java-1.11.0-openjdk-amd64 ANDROID_NDK=/android-ndk-r21 ./tools/build.sh --install $PWD/gdk-android-jni --ndk x86 --lto=true --enable-rust
+    - NUM_JOBS=16 JAVA_HOME=/usr/lib/jvm/java-1.11.0-openjdk-amd64 ANDROID_NDK=/android-ndk-r23b ./tools/build.sh --install $PWD/gdk-android-jni --ndk x86
 
 gdk_clang_ndk_x86_64:
   extends: .ndk_release
   script:
     - mkdir gdk-android-jni
-    - JAVA_HOME=/usr/lib/jvm/java-1.11.0-openjdk-amd64 ANDROID_NDK=/android-ndk-r21 ./tools/build.sh --install $PWD/gdk-android-jni --ndk x86_64 --lto=true --enable-rust
+    - NUM_JOBS=16 JAVA_HOME=/usr/lib/jvm/java-1.11.0-openjdk-amd64 ANDROID_NDK=/android-ndk-r23b ./tools/build.sh --install $PWD/gdk-android-jni --ndk x86_64
 
 test_rust:
   tags:
     - ga
   script:
     - source /root/.cargo/env
-    - rustup override set 1.49.0
+    - rustup override set 1.56.0
     - git clone https://github.com/ElementsProject/libwally-core
     - cd libwally-core && git checkout 88fc78ff72a4f3345fcb87d1c19dc5f6cc5b0e4c && ./tools/autogen.sh && ./configure --enable-debug --prefix=$PWD/build --enable-static --disable-shared --enable-elements --enable-ecmult-static-precomputation && make && make install && cd ..
     - export WALLY_DIR=$PWD/libwally-core/build/lib/
-    - curl -L https://github.com/openssl/openssl/archive/OpenSSL_1_1_1g.tar.gz | tar -xvz -C ${PWD}/subprojects
+    - curl -L https://github.com/openssl/openssl/archive/OpenSSL_1_1_1n.tar.gz | tar -xvz -C ${PWD}/subprojects
     - MESON_SOURCE_ROOT=${PWD} MESON_BUILD_ROOT=${PWD} ${PWD}/tools/buildopenssl.sh
     - export OPENSSL_DIR=${PWD}/openssl/build OPENSSL_STATIC=1
-    - cd subprojects/gdk_rust/gdk_common
-    - RUST_BACKTRACE=1 cargo test
-    - cd ../gdk_electrum
-    - RUST_BACKTRACE=1 cargo test
-    - cd $CI_PROJECT_DIR
-    - git clone https://github.com/Blockstream/electrs electrs-elements
-    - cd electrs-elements && git checkout 65e20f9e1196c0039d56307b34ea7bcfbe375b99
-    - cargo install --debug --root /tmp/electrs_bitcoin --locked --path .
-    - cargo install --debug --root /tmp/electrs_liquid --locked --path . --features liquid
-    - cd ..
-    - export ELECTRS_LIQUID_EXEC=/tmp/electrs_liquid/bin/electrs
-    - export ELECTRS_EXEC=/tmp/electrs_bitcoin/bin/electrs
+    - curl -L https://github.com/RCasatta/electrsd/releases/download/electrs_releases/electrs_linux_esplora_703c6a20d52b61a234a18812503bd754d448992a.gz | tar -xvz
+    - echo "6c62b280db4455a0bee1c60dcb7bb18f741313deb8aafdb7bad1bc2a3f4ff0b8  electrs" | sha256sum --check
+    - chmod 755 electrs && mv electrs electrs_bitcoin
+    - export ELECTRS_EXEC=$PWD/electrs_bitcoin
+    - curl -L https://github.com/RCasatta/electrsd/releases/download/electrs_releases/electrs_linux_esplora_703c6a20d52b61a234a18812503bd754d448992a_liquid.gz | tar -xvz
+    - echo "47571e09fbc5bc25504e3b66ee47295cea9912182d42721c11d895183e5b6c6e  electrs" | sha256sum --check
+    - chmod 755 electrs && mv electrs electrs_liquid
+    - export ELECTRS_LIQUID_EXEC=$PWD/electrs_liquid
     - curl https://bitcoincore.org/bin/bitcoin-core-0.20.1/bitcoin-0.20.1-x86_64-linux-gnu.tar.gz | tar -xvz bitcoin-0.20.1/bin/bitcoind
     - export BITCOIND_EXEC=$PWD/bitcoin-0.20.1/bin/bitcoind
-    - curl -L https://github.com/ElementsProject/elements/releases/download/elements-0.18.1.8/elements-0.18.1.8-x86_64-linux-gnu.tar.gz | tar -xvz elements-0.18.1.8/bin/elementsd
-    - export ELEMENTSD_EXEC=$PWD/elements-0.18.1.8/bin/elementsd
+    - curl -L https://github.com/ElementsProject/elements/releases/download/elements-0.21.0/elements-elements-0.21.0-x86_64-linux-gnu.tar.gz | tar -xvz elements-elements-0.21.0/bin/elementsd
+    - export ELEMENTSD_EXEC=$PWD/elements-elements-0.21.0/bin/elementsd
     - cd subprojects/gdk_rust
-    - DEBUG=1 RUST_BACKTRACE=1 cargo test -- --nocapture
+    - RUST_LOG=debug RUST_BACKTRACE=1 cargo test -- --nocapture
 
 test_osx_clang:
   extends: .osx_test
@@ -190,7 +192,7 @@ test_osx_clang:
     - cd $CI_PROJECT_DIR
     - ./tools/clean.sh dirs
     - virtualenv venv && source venv/bin/activate && pip install -r ./tools/requirements.txt
-    - ./tools/build.sh --clang --lto=true --enable-rust
+    - NUM_JOBS=16 ./tools/build.sh --clang
 
 release_osx_ios:
   extends: .ios_release
@@ -198,7 +200,7 @@ release_osx_ios:
     - cd $CI_PROJECT_DIR
     - ./tools/clean.sh dirs
     - virtualenv venv && source venv/bin/activate && pip install -r ./tools/requirements.txt
-    - ./tools/build.sh --iphone static --lto=true --install $PWD/gdk-iphone --enable-rust
+    - NUM_JOBS=16 ./tools/build.sh --iphone static --install $PWD/gdk-iphone
 
 release_osx_ios_sim:
   extends: .ios_sim_release
@@ -206,7 +208,7 @@ release_osx_ios_sim:
     - cd $CI_PROJECT_DIR
     - ./tools/clean.sh dirs
     - virtualenv venv && source venv/bin/activate && pip install -r ./tools/requirements.txt
-    - ./tools/build.sh --iphonesim static --lto=true --install $PWD/gdk-iphone-sim --enable-rust
+    - NUM_JOBS=16 ./tools/build.sh --iphonesim static --install $PWD/gdk-iphone-sim
 
 release_osx_ios_debug:
   extends: .ios_release
@@ -215,7 +217,7 @@ release_osx_ios_debug:
     - cd $CI_PROJECT_DIR
     - ./tools/clean.sh dirs
     - virtualenv venv && source venv/bin/activate && pip install -r ./tools/requirements.txt
-    - ./tools/build.sh --iphone static --lto=false --buildtype=debug --install $PWD/gdk-iphone --enable-rust
+    - NUM_JOBS=16 ./tools/build.sh --iphone static --buildtype=debug --install $PWD/gdk-iphone
 
 release_osx_ios_sim_debug:
   extends: .ios_sim_release
@@ -224,48 +226,55 @@ release_osx_ios_sim_debug:
     - cd $CI_PROJECT_DIR
     - ./tools/clean.sh dirs
     - virtualenv venv && source venv/bin/activate && pip install -r ./tools/requirements.txt
-    - ./tools/build.sh --iphonesim static --lto=false --buildtype=debug --install $PWD/gdk-iphone-sim --enable-rust
+    - NUM_JOBS=16 ./tools/build.sh --iphonesim static --buildtype=debug --install $PWD/gdk-iphone-sim
 
 test_osx_clang_ndk_armeabi-v7a:
   only:
     refs:
       - master
   extends: .osx_test
+  when: manual
   script:
     - cd $CI_PROJECT_DIR
     - ./tools/clean.sh dirs
     - virtualenv venv && source venv/bin/activate && pip install -r ./tools/requirements.txt
-    - ./tools/build.sh --ndk armeabi-v7a --enable-rust
+    - NUM_JOBS=16 ANDROID_NDK=/opt/android-ndk-r23b ./tools/build.sh --ndk armeabi-v7a
 
 test_osx_clang_ndk_arm64-v8a:
   only:
     refs:
       - master
   extends: .osx_test
+  when: manual
   script:
     - cd $CI_PROJECT_DIR
     - ./tools/clean.sh dirs
     - virtualenv venv && source venv/bin/activate && pip install -r ./tools/requirements.txt
-    - ./tools/build.sh --ndk arm64-v8a --enable-rust
+    - NUM_JOBS=16 ANDROID_NDK=/opt/android-ndk-r23b ./tools/build.sh --ndk arm64-v8a
 
 test_osx_clang_ndk_x86:
+  only:
+    refs:
+      - master
   extends: .osx_test
+  when: manual
   script:
     - cd $CI_PROJECT_DIR
     - ./tools/clean.sh dirs
     - virtualenv venv && source venv/bin/activate && pip install -r ./tools/requirements.txt
-    - ./tools/build.sh --ndk x86 --enable-rust
+    - NUM_JOBS=16 ANDROID_NDK=/opt/android-ndk-r23b ./tools/build.sh --ndk x86
 
 test_osx_clang_ndk_x86_64:
   only:
     refs:
       - master
+  when: manual
   extends: .osx_test
   script:
     - cd $CI_PROJECT_DIR
     - ./tools/clean.sh dirs
     - virtualenv venv && source venv/bin/activate && pip install -r ./tools/requirements.txt
-    - ./tools/build.sh --ndk x86_64 --enable-rust
+    - NUM_JOBS=16 ANDROID_NDK=/opt/android-ndk-r23b ./tools/build.sh --ndk x86_64
 
 test_windows_mingw_w64_cross:
   tags:
@@ -276,7 +285,7 @@ test_windows_mingw_w64_cross:
     paths:
     - build-windows-mingw-w64/src/libgreenaddress*
   script:
-    - ./tools/build.sh --mingw-w64 --enable-rust
+    - NUM_JOBS=16 ./tools/build.sh --mingw-w64
 
 apidocs:
   tags:
@@ -323,9 +332,44 @@ package_release:
   - gdk_clang_ndk_arm64-v8a
   - gdk_clang_ndk_x86
   - gdk_clang_ndk_x86_64
-  - release_py3m_buster
+  - release_py3m_bullseye
   - release_py3m_ubuntu_18.04
   - release_py3m_osx
+  - release_py3m_osx_m1
   - release_osx_ios
   - apidocs
   - release_osx_ios_sim
+
+cp_gcloud:
+  image: blockstream/gcloud-docker-tf:1.1.7
+  tags:
+    - ga
+  stage: publish
+  script:
+    - echo gs://green-gdk-builds/$CI_PROJECT_NAME-$CI_COMMIT_SHA
+    - TMPF=$(mktemp) || exit 1
+    - echo $GCLOUD_PUSH_KEY > $TMPF
+    - export GOOGLE_APPLICATION_CREDENTIALS=$TMPF
+    - gcloud auth activate-service-account --key-file=$TMPF
+    - gsutil cp -r $CI_PROJECT_DIR/gdk_dist gs://green-gdk-builds/$CI_PROJECT_NAME-$CI_COMMIT_SHA
+  dependencies:
+  - package_release
+
+cp_gcloud_master:
+  image: blockstream/gcloud-docker-tf:1.1.7
+  tags:
+    - ga
+  stage: publish
+  only:
+    refs:
+      - master
+  script:
+    - TMPF=$(mktemp) || exit 1
+    - echo $GCLOUD_PUSH_KEY > $TMPF
+    - export GOOGLE_APPLICATION_CREDENTIALS=$TMPF
+    - gcloud auth activate-service-account --key-file=$TMPF
+    - gsutil rm -r gs://green-gdk-builds/gdk-master || echo fail # avoid failing when dir does not exist
+    - gsutil cp -r $CI_PROJECT_DIR/gdk_dist gs://green-gdk-builds/gdk-master
+  dependencies:
+  - package_release
+

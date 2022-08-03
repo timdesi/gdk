@@ -27,8 +27,6 @@ namespace sdk {
     // Return a uint32_t in the range 0 to (upper_bound - 1) without bias
     uint32_t get_uniform_uint32_t(uint32_t upper_bound);
 
-    int32_t spv_verify_tx(const nlohmann::json& details);
-
     // STL compatible RNG returning uniform uint32_t's
     struct uniform_uint32_rng {
         uniform_uint32_rng() // NOLINT: ignored for valgrind use
@@ -56,28 +54,34 @@ namespace sdk {
         }
     }
 
-    template <typename F> void no_std_exception_escape(F&& fn) noexcept
+    bool nsee_log_info(std::string message, const char* context);
+
+    template <typename F> bool no_std_exception_escape(F&& fn, const char* context = "") noexcept
     {
+        std::string message;
         try {
             fn();
+            return false;
         } catch (const boost::exception& e) {
             try {
-                GDK_LOG_SEV(log_level::info) << "ignoring exception:" << diagnostic_information(e);
+                message = diagnostic_information(e);
             } catch (const std::exception&) {
             }
         } catch (const std::exception& e) {
             try {
-                const auto what = e.what();
-                GDK_LOG_SEV(log_level::info) << "ignoring exception:" << what;
+                message = e.what();
             } catch (const std::exception&) {
             }
         }
+        return nsee_log_info(message, context);
     }
 
     nlohmann::json parse_bitcoin_uri(const std::string& uri, const std::string& expected_scheme);
 
     nlohmann::json parse_url(const std::string& url);
     nlohmann::json select_url(const std::vector<nlohmann::json>& urls, bool use_tor);
+    std::string socksify(const std::string& proxy);
+    std::string unsocksify(const std::string& proxy);
 
     std::string format_recovery_key_message(const std::string& xpub, uint32_t subaccount, uint32_t version = 0);
 
@@ -89,11 +93,26 @@ namespace sdk {
     std::string encrypt_mnemonic(const std::string& plaintext_mnemonic, const std::string& password);
     std::string decrypt_mnemonic(const std::string& encrypted_mnemonic, const std::string& password);
 
+    // Compute base entropy for a client blob watch only login
+    std::vector<unsigned char> get_wo_entropy(const std::string& username, const std::string& password);
+
+    // Compute username and password for a client blob watch only login
+    std::pair<std::string, std::string> get_wo_credentials(byte_span_t entropy);
+
+    // Compute a local cache password for a client blob watch only login
+    pub_key_t get_wo_local_encryption_key(byte_span_t entropy, const std::string& server_entropy);
+
+    // Encrypt the client blob key to the watch only entropy, return as hex
+    std::string encrypt_wo_blob_key(byte_span_t entropy, const pbkdf2_hmac256_t& blob_key);
+
+    // Decrypt the encrypted client blob key with the watch only entropy
+    pbkdf2_hmac256_t decrypt_wo_blob_key(byte_span_t entropy, const std::string& wo_blob_key_hex);
+
     // Encryption
-    std::string aes_cbc_decrypt(
-        const std::array<unsigned char, PBKDF2_HMAC_SHA256_LEN>& key, const std::string& ciphertext);
-    std::string aes_cbc_encrypt(
-        const std::array<unsigned char, PBKDF2_HMAC_SHA256_LEN>& key, const std::string& plaintext);
+    std::vector<unsigned char> aes_cbc_decrypt(const pbkdf2_hmac256_t& key, byte_span_t ciphertext);
+    std::vector<unsigned char> aes_cbc_decrypt_from_hex(const pbkdf2_hmac256_t& key, const std::string& ciphertext_hex);
+    std::vector<unsigned char> aes_cbc_encrypt(const pbkdf2_hmac256_t& key, byte_span_t plaintext);
+    std::string aes_cbc_encrypt_to_hex(const pbkdf2_hmac256_t& key, byte_span_t plaintext);
 
     size_t aes_gcm_decrypt_get_length(byte_span_t cyphertext);
     size_t aes_gcm_decrypt(byte_span_t key, byte_span_t cyphertext, gsl::span<unsigned char> plaintext);
@@ -109,6 +128,29 @@ namespace sdk {
         const network_parameters& net_params, const std::string& chain_code_hex, const std::string& public_key_hex);
     nlohmann::json get_wallet_hash_id(const nlohmann::json& net_params, const nlohmann::json& params);
 
+    // RUST FFI:
+    // GA_init for rust
+    // No-op if rust support is not compiled in
+    void init_rust(const nlohmann::json& details);
+
+    // Make a call into rust code and return the result
+    // Throws if rust support is not compiled in
+    nlohmann::json rust_call(const std::string& method, const nlohmann::json& input, void* session = nullptr);
+
+    // Return the SPV verification status of a tx
+    uint32_t spv_verify_tx(const nlohmann::json& details);
+
+    // Convert an SPV status into one of:
+    // "in_progress", "verified", "not_verified", "disabled", "not_longest", "unconfirmed"
+    std::string spv_get_status_string(uint32_t spv_status);
+
+    // Extract the transaction from a PSBT or PSET
+    std::string psbt_extract_tx(const std::string& psbt);
+
+    // Merge a transaction in a PSBT or PSET
+    std::string psbt_merge_tx(const std::string& psbt, const std::string& tx_hex);
+
+    std::string gdb_dump_json(const nlohmann::json& json);
 } // namespace sdk
 } // namespace ga
 

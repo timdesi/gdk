@@ -2,23 +2,24 @@
 #define GDK_SESSION_IMPL_HPP
 
 #pragma once
+#include <mutex>
+#include <set>
 #include <thread>
 
 #include "amount.hpp"
-#include "autobahn_wrapper.hpp"
+#include "boost_wrapper.hpp"
 #include "ga_wally.hpp"
 #include "network_parameters.hpp"
 
 namespace ga {
 namespace sdk {
-    using ping_fail_t = std::function<void()>;
     using pubkey_and_script_t = std::pair<std::vector<unsigned char>, std::vector<unsigned char>>;
     using unique_pubkeys_and_scripts_t = std::set<pubkey_and_script_t>;
 
     class ga_pubkeys;
-    class ga_user_pubkeys;
     class user_pubkeys;
     class signer;
+    struct tor_controller;
 
     class session_impl {
     public:
@@ -33,7 +34,7 @@ namespace sdk {
         virtual ~session_impl();
 
         // Factory method
-        static boost::shared_ptr<session_impl> create(const nlohmann::json& net_params);
+        static std::shared_ptr<session_impl> create(const nlohmann::json& net_params);
 
         // UTXOs
         using utxo_cache_value_t = std::shared_ptr<const nlohmann::json>;
@@ -58,38 +59,45 @@ namespace sdk {
         virtual nlohmann::json register_user(const std::string& master_pub_key_hex,
             const std::string& master_chain_code_hex, const std::string& gait_path_hex, bool supports_csv);
 
-        virtual bool is_connected() const = 0;
-        virtual void set_ping_fail_handler(ping_fail_t handler) = 0;
-        virtual void set_heartbeat_timeout_handler(websocketpp::pong_timeout_handler) = 0;
+        // Disable notifications from being delivered
+        void disable_notifications();
         // Call the users registered notification handler. Must be called without any locks held.
         virtual void emit_notification(nlohmann::json details, bool async);
-        virtual bool reconnect() = 0;
-        virtual void reconnect_hint(bool enable, bool restart) = 0;
-        virtual void try_reconnect() = 0;
-
-        // TODO: remove me when tor MR extract lands
-        virtual void tor_sleep_hint(const std::string& hint) = 0;
-        virtual std::string get_tor_socks5() = 0;
+        std::string connect_tor();
+        virtual void reconnect() = 0;
+        virtual void reconnect_hint(const nlohmann::json& hint);
+        // Get the tor or user connection proxy address
+        nlohmann::json get_proxy_settings() const;
+        nlohmann::json get_registry_config() const;
 
         virtual void connect() = 0;
         virtual void disconnect() = 0;
 
-        virtual nlohmann::json http_request(nlohmann::json params) = 0;
-        virtual nlohmann::json refresh_assets(const nlohmann::json& params) = 0;
+        // Make an http request to an arbitrary host governed by 'params'.
+        virtual nlohmann::json http_request(nlohmann::json params);
+        virtual nlohmann::json refresh_assets(const nlohmann::json& params);
+        nlohmann::json get_assets(const nlohmann::json& params);
         virtual nlohmann::json validate_asset_domain_name(const nlohmann::json& params) = 0;
 
+        virtual void load_store(std::shared_ptr<signer> signer);
+        virtual void start_sync_threads();
+        virtual std::vector<uint32_t> get_subaccount_pointers() = 0;
         virtual std::string get_challenge(const pub_key_t& public_key) = 0;
         virtual nlohmann::json authenticate(const std::string& sig_der_hex, const std::string& path_hex,
             const std::string& root_bip32_xpub, std::shared_ptr<signer> signer)
             = 0;
-        virtual void register_subaccount_xpubs(const std::vector<std::string>& bip32_xpubs) = 0;
+        virtual void register_subaccount_xpubs(
+            const std::vector<uint32_t>& pointers, const std::vector<std::string>& bip32_xpubs)
+            = 0;
         virtual nlohmann::json login(std::shared_ptr<signer> signer);
-        virtual std::string mnemonic_from_pin_data(const nlohmann::json& pin_data) = 0;
-        virtual nlohmann::json login_watch_only(std::shared_ptr<signer> signer) = 0;
-        virtual bool set_watch_only(const std::string& username, const std::string& password) = 0;
-        virtual std::string get_watch_only_username() = 0;
+        virtual nlohmann::json credentials_from_pin_data(const nlohmann::json& pin_data) = 0;
+        virtual nlohmann::json login_wo(std::shared_ptr<signer> signer) = 0;
+        virtual bool set_wo_credentials(const std::string& username, const std::string& password) = 0;
+        virtual std::string get_wo_username() = 0;
         virtual bool remove_account(const nlohmann::json& twofactor_data) = 0;
 
+        // Returns true if the subaccount was discovered
+        virtual bool discover_subaccount(const std::string& xpub, const std::string& type);
         virtual uint32_t get_next_subaccount(const std::string& type) = 0;
         virtual nlohmann::json create_subaccount(
             const nlohmann::json& details, uint32_t subaccount, const std::string& xpub)
@@ -103,20 +111,24 @@ namespace sdk {
         virtual void postprocess_transactions(nlohmann::json& tx_list);
 
         virtual void set_notification_handler(GA_notification_handler handler, void* context);
+        bool set_signer(std::shared_ptr<signer> signer);
 
         virtual nlohmann::json get_receive_address(const nlohmann::json& details) = 0;
-        virtual nlohmann::json get_previous_addresses(uint32_t subaccount, uint32_t last_pointer) = 0;
+        virtual nlohmann::json get_previous_addresses(const nlohmann::json& details) = 0;
         virtual nlohmann::json get_subaccounts() = 0;
         virtual nlohmann::json get_subaccount(uint32_t subaccount) = 0;
         virtual void rename_subaccount(uint32_t subaccount, const std::string& new_name) = 0;
         virtual void set_subaccount_hidden(uint32_t subaccount, bool is_hidden) = 0;
         virtual std::vector<uint32_t> get_subaccount_root_path(uint32_t subaccount) = 0;
-        virtual std::vector<uint32_t> get_subaccount_full_path(uint32_t subaccount, uint32_t pointer) = 0;
+        virtual std::vector<uint32_t> get_subaccount_full_path(uint32_t subaccount, uint32_t pointer, bool is_internal)
+            = 0;
+        virtual nlohmann::json get_subaccount_xpub(uint32_t subaccount);
 
         virtual nlohmann::json get_available_currencies() const = 0;
 
         virtual bool is_rbf_enabled() const = 0;
         virtual bool is_watch_only() const = 0;
+        virtual void ensure_full_session() = 0;
         virtual nlohmann::json get_settings() = 0;
         virtual nlohmann::json get_post_login_data() = 0;
         virtual void change_settings(const nlohmann::json& settings) = 0;
@@ -150,21 +162,28 @@ namespace sdk {
 
         virtual nlohmann::json cancel_twofactor_reset(const nlohmann::json& twofactor_data) = 0;
 
-        virtual nlohmann::json set_pin(
-            const std::string& mnemonic, const std::string& pin, const std::string& device_id)
-            = 0;
+        virtual nlohmann::json encrypt_with_pin(const nlohmann::json& details) = 0;
 
-        virtual bool set_blinding_nonce(
-            const std::string& pubkey_hex, const std::string& script_hex, const std::string& nonce_hex);
+        virtual bool encache_blinding_data(const std::string& pubkey_hex, const std::string& script_hex,
+            const std::string& nonce_hex, const std::string& blinding_pubkey_hex);
+        virtual void encache_scriptpubkey_data(byte_span_t scriptpubkey, const uint32_t subaccount,
+            const uint32_t branch, const uint32_t pointer, const uint32_t subtype, const uint32_t script_type);
+        virtual void encache_new_scriptpubkeys(const uint32_t subaccount);
+        virtual nlohmann::json get_scriptpubkey_data(byte_span_t scriptpubkey);
+        virtual nlohmann::json psbt_get_details(const nlohmann::json& details);
         virtual void upload_confidential_addresses(
             uint32_t subaccount, const std::vector<std::string>& confidential_addresses)
             = 0;
 
         virtual wally_tx_ptr get_raw_transaction_details(const std::string& txhash_hex) const = 0;
-        nlohmann::json get_transaction_details(const std::string& txhash_hex) const;
+        virtual nlohmann::json get_transaction_details(const std::string& txhash_hex) const = 0;
 
         virtual nlohmann::json create_transaction(const nlohmann::json& details) = 0;
-        virtual nlohmann::json sign_transaction(const nlohmann::json& details) = 0;
+        virtual nlohmann::json user_sign_transaction(const nlohmann::json& details) = 0;
+        virtual nlohmann::json service_sign_transaction(
+            const nlohmann::json& details, const nlohmann::json& twofactor_data)
+            = 0;
+        virtual nlohmann::json psbt_sign(const nlohmann::json& details) = 0;
         virtual nlohmann::json send_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data)
             = 0;
         virtual std::string broadcast_transaction(const std::string& tx_hex) = 0;
@@ -194,7 +213,7 @@ namespace sdk {
         virtual nlohmann::json get_spending_limits() const = 0;
         virtual bool is_spending_limits_decrease(const nlohmann::json& limit_details) = 0;
 
-        virtual void set_local_encryption_keys(const pub_key_t& public_key, std::shared_ptr<signer> signer);
+        virtual void set_local_encryption_keys(const pub_key_t& public_key, std::shared_ptr<signer> signer) = 0;
         virtual void save_cache();
         virtual void disable_all_pin_logins() = 0;
 
@@ -204,12 +223,20 @@ namespace sdk {
         virtual void encache_signer_xpubs(std::shared_ptr<signer> signer);
 
         virtual ga_pubkeys& get_ga_pubkeys() = 0;
-        virtual user_pubkeys& get_user_pubkeys() = 0;
-        virtual ga_user_pubkeys& get_recovery_pubkeys() = 0;
+        virtual user_pubkeys& get_user_pubkeys();
+        virtual user_pubkeys& get_recovery_pubkeys() = 0;
 
         // Cached data
-        virtual std::pair<std::string, bool> get_cached_master_blinding_key();
+        virtual std::pair<std::string, bool> get_cached_master_blinding_key() = 0;
         virtual void set_cached_master_blinding_key(const std::string& master_blinding_key_hex);
+
+        virtual bool has_recovery_pubkeys_subaccount(uint32_t subaccount);
+        virtual std::string get_service_xpub(uint32_t subaccount);
+        virtual std::string get_recovery_xpub(uint32_t subaccount);
+        virtual std::vector<unsigned char> output_script_from_utxo(const nlohmann::json& utxo);
+        virtual std::vector<pub_key_t> pubkeys_from_utxo(const nlohmann::json& utxo);
+
+        virtual nlohmann::json gl_call(const char* method, const nlohmann::json& params);
 
     protected:
         // Locking per-session assumes the following thread safety model:
@@ -235,7 +262,11 @@ namespace sdk {
 
         // Immutable upon construction
         const network_parameters m_net_params;
-        const bool m_debug_logging;
+        boost::asio::io_context m_io;
+        boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_work_guard;
+        std::thread m_run_thread; // Runs the asio context
+        const std::string m_user_proxy;
+        std::shared_ptr<tor_controller> m_tor_ctrl;
 
         // Immutable once set by the caller (prior to connect)
         GA_notification_handler m_notification_handler;
@@ -243,10 +274,15 @@ namespace sdk {
 
         // Immutable post-login
         std::shared_ptr<signer> m_signer;
+        std::unique_ptr<user_pubkeys> m_user_pubkeys;
 
         // Mutable
+        std::string m_tor_proxy; // Updated on connect(), protected by m_mutex
+        std::atomic_bool m_notify; // Whether to emit notifications
 
         // UTXOs
+        // Cached UTXOs are unfiltered; if using the cached values you
+        // may need to filter them first (e.g. to removed expired or frozen UTXOS)
         using utxo_cache_key_t = std::pair<uint32_t, uint32_t>; // subaccount, num_confs
         using utxo_cache_t = std::map<utxo_cache_key_t, utxo_cache_value_t>;
         mutable std::mutex m_utxo_cache_mutex;

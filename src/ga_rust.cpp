@@ -11,243 +11,177 @@
 #include "exception.hpp"
 #include "ga_rust.hpp"
 #include "ga_strings.hpp"
-#include "ga_tor.hpp"
-#include "inbuilt.hpp"
 #include "logging.hpp"
 #include "session.hpp"
 #include "signer.hpp"
 #include "utils.hpp"
+#include "xpub_hdkey.hpp"
 
 namespace ga {
 namespace sdk {
 
-    namespace {
-        static const std::string TOR_SOCKS5_PREFIX("socks5://");
-
-        static std::pair<std::string, std::string> get_exception_details(const nlohmann::json& details)
-        {
-            std::pair<std::string, std::string> ret;
-            if (!details.is_null()) {
-                try {
-                    ret.first = details.value("error", std::string());
-                    ret.second = details.value("message", std::string());
-                } catch (const std::exception&) {
-                    // Ignore
-                }
-            }
-            return ret;
-        }
-
-        static void check_code(const int32_t return_code, const nlohmann::json& json)
-        {
-            if (return_code != GA_OK) {
-                switch (return_code) {
-                case GA_RECONNECT:
-                case GA_SESSION_LOST:
-                    throw reconnect_error();
-
-                case GA_TIMEOUT:
-                    throw timeout_error();
-
-                case GA_NOT_AUTHORIZED:
-                    throw login_error(get_exception_details(json).second);
-
-                case GA_ERROR:
-                default:
-                    throw user_error(get_exception_details(json).second);
-                }
-            }
-        }
-    } // namespace
-
     ga_rust::ga_rust(network_parameters&& net_params)
         : session_impl(std::move(net_params))
     {
-        const auto res = GDKRUST_create_session(&m_session, m_net_params.get_json().dump().c_str());
-        GDK_RUNTIME_ASSERT(res == GA_OK);
+        auto np = m_net_params.get_json();
+        const auto res = GDKRUST_create_session(&m_session, np.dump().c_str());
+        GDK_RUNTIME_ASSERT(res == GA_OK && m_session);
+        m_user_pubkeys = std::make_unique<bip44_pubkeys>(m_net_params);
     }
 
     ga_rust::~ga_rust()
     {
+        m_notify = false;
         GDKRUST_destroy_session(m_session);
         // gdk_rust cleanup
-    }
-
-    bool ga_rust::is_connected() const { throw std::runtime_error("is_connected not implemented"); }
-
-    void ga_rust::set_ping_fail_handler(ping_fail_t handler) {}
-    void ga_rust::set_heartbeat_timeout_handler(websocketpp::pong_timeout_handler)
-    {
-        // throw std::runtime_error("set_heartbeat_timeout_handler not implemented");
-    }
-
-    bool ga_rust::reconnect()
-    {
-        ga_rust::disconnect();
-        if (m_reconnect_restart) {
-            ga_rust::connect();
-        }
-        return true;
-    }
-
-    void ga_rust::reconnect_hint(bool enable, bool restart) { m_reconnect_restart = restart; }
-
-    void ga_rust::try_reconnect() { reconnect(); }
-
-    void ga_rust::tor_sleep_hint(const std::string& hint)
-    {
-        if (m_tor_ctrl) {
-            m_tor_ctrl->tor_sleep_hint(hint);
-        }
-    }
-
-    std::string ga_rust::get_tor_socks5()
-    {
-        return m_tor_ctrl ? m_tor_ctrl->wait_for_socks5(DEFAULT_TOR_SOCKS_WAIT, nullptr) : std::string{};
-    }
-
-    nlohmann::json ga_rust::call_session(const std::string& method, const nlohmann::json& input) const
-    {
-        char* output = nullptr;
-        int res = GDKRUST_call_session(m_session, method.c_str(), input.dump().c_str(), &output);
-        if (!output) {
-            // output was not set by calling `std::ffi::CString::into_raw`;
-            // avoid calling GDKRUST_destroy_string.
-            const auto cppjson = nlohmann::json();
-            check_code(res, cppjson);
-            return cppjson;
-        }
-        const nlohmann::json cppjson = nlohmann::json::parse(output);
-        GDKRUST_destroy_string(output);
-        check_code(res, cppjson);
-        return cppjson;
     }
 
     void ga_rust::connect()
     {
         nlohmann::json net_params = m_net_params.get_json();
+        net_params["proxy"] = session_impl::connect_tor();
+        rust_call("connect", net_params, m_session);
+    }
 
-        if (m_net_params.use_tor() && m_net_params.socks5().empty()) {
-            m_tor_ctrl = tor_controller::get_shared_ref();
-            std::string full_socks5
-                = m_tor_ctrl->wait_for_socks5(DEFAULT_TOR_SOCKS_WAIT, [&](std::shared_ptr<tor_bootstrap_phase> p) {
-                      nlohmann::json tor_json(
-                          { { "tag", p->tag }, { "summary", p->summary }, { "progress", p->progress } });
-                      constexpr bool async = false; // Note: ga_session sends this async
-                      emit_notification({ { "event", "tor" }, { "tor", tor_json } }, async);
-                  });
+    void ga_rust::reconnect()
+    {
+        // Called by the top level session handler in reponse to
+        // reconnect and timeout errors.
+        disconnect();
+        connect();
+    }
 
-            if (full_socks5.empty()) {
-                throw timeout_error();
+    void ga_rust::reconnect_hint(const nlohmann::json& hint)
+    {
+        // Called by the user to indicate they want to connect or disconnect
+        // the sessions underlying transport
+        session_impl::reconnect_hint(hint);
+
+        const auto hint_p = hint.find("hint");
+        if (hint_p != hint.end()) {
+            if (*hint_p == "connect") {
+                connect();
+            } else {
+                disconnect();
             }
-
-            GDK_RUNTIME_ASSERT(full_socks5.size() > TOR_SOCKS5_PREFIX.size());
-            full_socks5.erase(0, TOR_SOCKS5_PREFIX.size());
-
-            net_params["socks5"] = full_socks5;
-
-            GDK_LOG_SEV(log_level::info) << "tor_socks address " << full_socks5;
         }
-
-        call_session("connect", net_params);
     }
 
     void ga_rust::disconnect()
     {
         GDK_LOG_SEV(log_level::debug) << "ga_rust::disconnect";
-        call_session("disconnect", {});
-    }
-
-    nlohmann::json ga_rust::http_request(nlohmann::json params)
-    {
-        throw std::runtime_error("http_request not implemented");
-    }
-
-    nlohmann::json ga_rust::refresh_assets(const nlohmann::json& params)
-    {
-        auto result = call_session("refresh_assets", params);
-        const std::array<const char*, 2> keys = { "assets", "icons" };
-        for (const auto& key : keys) {
-            if (params.value(key, false)) {
-                auto& data = result.at(key);
-                if (data.empty()) {
-                    // An empty result is a sentinel indicating that the initial
-                    // data fetch failed. Return the compiled-in data in this case.
-                    result[key] = get_inbuilt_data(m_net_params, key).at("body");
-                } else {
-                    // Filter out any bad keys returned by the asset registry
-                    json_filter_bad_asset_ids(data);
-                }
-            }
-        }
-        if (params.value("assets", false)) {
-            // Add the policy asset to asset data
-            const auto policy_asset = m_net_params.policy_asset();
-            result["assets"][policy_asset] = { { "asset_id", policy_asset }, { "name", "btc" } };
-        }
-        return result;
+        rust_call("disconnect", {}, m_session);
     }
 
     nlohmann::json ga_rust::validate_asset_domain_name(const nlohmann::json& params) { return nlohmann::json(); }
 
+    void ga_rust::set_local_encryption_keys(const pub_key_t& /*public_key*/, std::shared_ptr<signer> signer)
+    {
+        auto master_xpub = signer->get_master_bip32_xpub();
+        rust_call("load_store", { { "master_xpub", std::move(master_xpub) } }, m_session);
+        if (!signer->has_master_blinding_key()) {
+            // Load the cached master blinding key, if we have it
+            std::string blinding_key_hex;
+            bool denied;
+            std::tie(blinding_key_hex, denied) = get_cached_master_blinding_key();
+            if (!denied) {
+                signer->set_master_blinding_key(blinding_key_hex);
+            }
+        }
+        // FIXME: Load subaccount paths and xpubs from the store and add them
+        // with signer->cache_bip32_xpub() - see ga_session::load_signer_xpubs
+        // (This avoids having to go to the HWW to fetch these xpubs)
+    }
+
+    void ga_rust::start_sync_threads() { rust_call("start_threads", {}, m_session); }
+
     std::string ga_rust::get_challenge(const pub_key_t& /*public_key*/) { throw std::runtime_error("not implemented"); }
-    nlohmann::json ga_rust::authenticate(const std::string& sig_der_hex, const std::string& path_hex,
-        const std::string& root_bip32_xpub, std::shared_ptr<signer> signer)
+
+    nlohmann::json ga_rust::authenticate(const std::string& /*sig_der_hex*/, const std::string& /*path_hex*/,
+        const std::string& /*root_bip32_xpub*/, std::shared_ptr<signer> signer)
     {
-        throw std::runtime_error("not implemented");
+        set_signer(signer);
+        return get_post_login_data();
     }
-    void ga_rust::register_subaccount_xpubs(const std::vector<std::string>& bip32_xpubs)
+
+    void ga_rust::register_subaccount_xpubs(
+        const std::vector<uint32_t>& pointers, const std::vector<std::string>& bip32_xpubs)
     {
-        throw std::runtime_error("register_subaccount_xpubs not implemented");
+        // Note we only register each loaded subaccount once.
+        const nlohmann::json details({ { "name", std::string() } });
+        for (size_t i = 0; i < pointers.size(); ++i) {
+            const auto pointer = pointers.at(i);
+            if (!m_user_pubkeys->have_subaccount(pointer)) {
+                const auto& bip32_xpub = bip32_xpubs.at(i);
+                create_subaccount(details, pointer, bip32_xpub);
+            }
+        }
     }
+
     nlohmann::json ga_rust::login(std::shared_ptr<signer> signer)
     {
-        {
-            locker_t locker(m_mutex);
-            // Re-login must use the same signer
-            GDK_RUNTIME_ASSERT(!m_signer.get() || m_signer.get() == signer.get());
-            m_signer = signer;
-        }
-        auto details
-            = nlohmann::json({ { "mnemonic", signer->get_mnemonic(std::string()) }, { "password", std::string() } });
-        return call_session("login", details);
+        set_signer(signer);
+        return rust_call("login", signer->get_credentials(), m_session);
     }
-    std::string ga_rust::mnemonic_from_pin_data(const nlohmann::json& pin_data)
+    nlohmann::json ga_rust::credentials_from_pin_data(const nlohmann::json& pin_data)
     {
-        return call_session("mnemonic_from_pin_data", pin_data);
+        return rust_call("credentials_from_pin_data", pin_data, m_session);
     }
-    nlohmann::json ga_rust::login_watch_only(std::shared_ptr<signer> signer)
+    nlohmann::json ga_rust::login_wo(std::shared_ptr<signer> signer)
     {
-        throw std::runtime_error("login_watch_only not implemented");
+        throw std::runtime_error("login_wo not implemented");
         __builtin_unreachable();
     }
-    bool ga_rust::set_watch_only(const std::string& username, const std::string& password)
+    bool ga_rust::set_wo_credentials(const std::string& username, const std::string& password)
     {
-        throw std::runtime_error("set_watch_only not implemented");
+        throw std::runtime_error("set_wo_credentials not implemented");
     }
-    std::string ga_rust::get_watch_only_username()
+    std::string ga_rust::get_wo_username()
     {
         // TODO
         return std::string{};
     }
     bool ga_rust::remove_account(const nlohmann::json& twofactor_data)
     {
-        throw std::runtime_error("remove_account not implemented");
+        rust_call("remove_account", {}, m_session);
+        return true;
+    }
+
+    bool ga_rust::discover_subaccount(const std::string& xpub, const std::string& type)
+    {
+        const auto details = nlohmann::json({ { "type", type }, { "xpub", xpub } });
+        return rust_call("discover_subaccount", details, m_session);
     }
 
     uint32_t ga_rust::get_next_subaccount(const std::string& type)
     {
-        return call_session("get_next_subaccount", nlohmann::json({ { "type", type } }));
+        return rust_call("get_next_subaccount", nlohmann::json({ { "type", type } }), m_session);
     }
 
     nlohmann::json ga_rust::create_subaccount(
         const nlohmann::json& details, uint32_t subaccount, const std::string& xpub)
     {
-        auto details_c = nlohmann::json({
-            { "subaccount", subaccount },
-            { "name", details.at("name") },
-        });
-        return call_session("create_subaccount", details_c);
+        auto details_c = details;
+        details_c["subaccount"] = subaccount;
+        details_c["xpub"] = xpub;
+        auto ret = rust_call("create_subaccount", details_c, m_session);
+        m_user_pubkeys->add_subaccount(subaccount, make_xpub(xpub));
+        return ret;
+    }
+
+    std::pair<std::string, bool> ga_rust::get_cached_master_blinding_key()
+    {
+        const auto ret = rust_call("get_master_blinding_key", {}, m_session);
+        constexpr bool is_denied = false;
+        return { ret.value("master_blinding_key", std::string()), is_denied };
+    }
+
+    void ga_rust::set_cached_master_blinding_key(const std::string& master_blinding_key_hex)
+    {
+        GDK_RUNTIME_ASSERT_MSG(
+            !master_blinding_key_hex.empty(), "HWW must enable host unblinding for singlesig wallets");
+        session_impl::set_cached_master_blinding_key(master_blinding_key_hex);
+        rust_call("set_master_blinding_key", { { "master_blinding_key", master_blinding_key_hex } }, m_session);
     }
 
     void ga_rust::change_settings_limits(const nlohmann::json& limit_details, const nlohmann::json& twofactor_data)
@@ -265,7 +199,7 @@ namespace sdk {
             actual_details = details;
         }
 
-        return call_session("get_transactions", actual_details);
+        return rust_call("get_transactions", actual_details, m_session);
     }
 
     void ga_rust::GDKRUST_notif_handler(void* self_context, char* json)
@@ -289,19 +223,33 @@ namespace sdk {
 
     nlohmann::json ga_rust::get_receive_address(const nlohmann::json& details)
     {
-        return call_session("get_receive_address", details);
+        return rust_call("get_receive_address", details, m_session);
     }
 
-    nlohmann::json ga_rust::get_previous_addresses(uint32_t subaccount, uint32_t last_pointer)
+    nlohmann::json ga_rust::get_previous_addresses(const nlohmann::json& details)
     {
-        throw std::runtime_error("get_previous_addresses not implemented");
+        nlohmann::json actual_details = details;
+
+        // Same pagination as multisig
+        actual_details["count"] = 10;
+
+        return rust_call("get_previous_addresses", actual_details, m_session);
     }
 
-    nlohmann::json ga_rust::get_subaccounts() { return call_session("get_subaccounts", nlohmann::json{}); }
+    nlohmann::json ga_rust::get_subaccounts() { return rust_call("get_subaccounts", {}, m_session); }
+
+    std::vector<uint32_t> ga_rust::get_subaccount_pointers()
+    {
+        std::vector<uint32_t> ret;
+        for (const auto& pointer : rust_call("get_subaccount_nums", {}, m_session)) {
+            ret.emplace_back(pointer);
+        }
+        return ret;
+    }
 
     nlohmann::json ga_rust::get_subaccount(uint32_t subaccount)
     {
-        return call_session("get_subaccount", nlohmann::json{ { "subaccount", subaccount } });
+        return rust_call("get_subaccount", nlohmann::json{ { "subaccount", subaccount } }, m_session);
     }
 
     void ga_rust::rename_subaccount(uint32_t subaccount, const std::string& new_name)
@@ -310,7 +258,7 @@ namespace sdk {
             { "subaccount", subaccount },
             { "new_name", new_name },
         });
-        call_session("rename_subaccount", details);
+        rust_call("rename_subaccount", details, m_session);
     }
 
     void ga_rust::set_subaccount_hidden(uint32_t subaccount, bool is_hidden)
@@ -319,40 +267,51 @@ namespace sdk {
             { "subaccount", subaccount },
             { "hidden", is_hidden },
         });
-        call_session("set_subaccount_hidden", details);
+        rust_call("set_subaccount_hidden", details, m_session);
     }
 
     std::vector<uint32_t> ga_rust::get_subaccount_root_path(uint32_t subaccount)
     {
-        // FIXME: Use rust mapping/map in user pubkeys
-        const std::array<uint32_t, 3> purpose_lookup{ 49, 84, 44 };
-        const bool main_net = m_net_params.is_main_net();
-        const bool liquid = m_net_params.is_liquid();
-
-        const uint32_t purpose = purpose_lookup.at(subaccount % 16);
-        const uint32_t coin_type = main_net ? (liquid ? 1776 : 0) : 1;
-        const uint32_t account = subaccount / 16;
-        return std::vector<uint32_t>{ harden(purpose), harden(coin_type), account };
+        return bip44_pubkeys::get_bip44_subaccount_root_path(
+            m_net_params.is_main_net(), m_net_params.is_liquid(), subaccount);
     }
 
-    std::vector<uint32_t> ga_rust::get_subaccount_full_path(uint32_t subaccount, uint32_t pointer)
+    std::vector<uint32_t> ga_rust::get_subaccount_full_path(uint32_t subaccount, uint32_t pointer, bool is_internal)
     {
-        throw std::runtime_error("get_subaccount_full_path not implemented");
+        return bip44_pubkeys::get_bip44_subaccount_full_path(
+            m_net_params.is_main_net(), m_net_params.is_liquid(), subaccount, pointer, is_internal);
+    }
+
+    nlohmann::json ga_rust::get_subaccount_xpub(uint32_t subaccount)
+    {
+        return rust_call("get_subaccount_xpub", { { "subaccount", subaccount } }, m_session);
     }
 
     nlohmann::json ga_rust::get_available_currencies() const
     {
-        return call_session("get_available_currencies", nlohmann::json({}));
+        return rust_call("get_available_currencies", nlohmann::json({}), m_session);
     }
 
-    bool ga_rust::is_rbf_enabled() const { throw std::runtime_error("is_rbf_enabled not implemented"); }
+    bool ga_rust::is_rbf_enabled() const
+    {
+        return !m_net_params.is_liquid(); // Not supported on liquid
+    }
+
     bool ga_rust::is_watch_only() const { return false; }
+    void ga_rust::ensure_full_session()
+    { /* TODO: Implement when watch only is implemented */
+    }
 
-    nlohmann::json ga_rust::get_settings() { return call_session("get_settings", nlohmann::json({})); }
+    nlohmann::json ga_rust::get_settings() { return rust_call("get_settings", nlohmann::json({}), m_session); }
 
-    nlohmann::json ga_rust::get_post_login_data() { throw std::runtime_error("get_post_login_data not implemented"); }
+    nlohmann::json ga_rust::get_post_login_data()
+    {
+        auto master_xpub = get_nonnull_signer()->get_master_bip32_xpub();
+        return get_wallet_hash_id(
+            { { "name", m_net_params.network() } }, { { "master_xpub", std::move(master_xpub) } });
+    }
 
-    void ga_rust::change_settings(const nlohmann::json& settings) { call_session("change_settings", settings); }
+    void ga_rust::change_settings(const nlohmann::json& settings) { rust_call("change_settings", settings, m_session); }
 
     nlohmann::json ga_rust::get_twofactor_config(bool reset_cached) { return nlohmann::json({}); }
 
@@ -398,22 +357,16 @@ namespace sdk {
 
     nlohmann::json ga_rust::cancel_twofactor_reset(const nlohmann::json& twofactor_data) { return nlohmann::json{}; }
 
-    nlohmann::json ga_rust::set_pin(const std::string& mnemonic, const std::string& pin, const std::string& device_id)
+    nlohmann::json ga_rust::encrypt_with_pin(const nlohmann::json& details)
     {
-        auto details = nlohmann::json({
-            { "pin", pin },
-            { "mnemonic", mnemonic },
-            { "device_id", device_id },
-        });
-
-        return call_session("set_pin", details);
+        return rust_call("encrypt_with_pin", details, m_session);
     }
 
     nlohmann::json ga_rust::get_unspent_outputs(
         const nlohmann::json& details, unique_pubkeys_and_scripts_t& /*missing*/)
     {
         // FIXME: Use 'missing' once unblinding uses HWW interface
-        return call_session("get_unspent_outputs", details);
+        return rust_call("get_unspent_outputs", details, m_session);
     }
 
     nlohmann::json ga_rust::get_unspent_outputs_for_private_key(
@@ -430,8 +383,23 @@ namespace sdk {
 
     wally_tx_ptr ga_rust::get_raw_transaction_details(const std::string& txhash_hex) const
     {
-        const auto tx_hex = call_session("get_raw_transaction_details", nlohmann::json(txhash_hex));
-        return tx_from_hex(tx_hex, tx_flags(m_net_params.is_liquid()));
+        try {
+            const auto tx_hex = rust_call("get_transaction_hex", nlohmann::json(txhash_hex), m_session);
+            return tx_from_hex(tx_hex, tx_flags(m_net_params.is_liquid()));
+        } catch (const std::exception& e) {
+            GDK_LOG_SEV(log_level::warning) << "Error fetching " << txhash_hex << " : " << e.what();
+            throw user_error("Transaction not found");
+        }
+    }
+
+    nlohmann::json ga_rust::get_transaction_details(const std::string& txhash_hex) const
+    {
+        try {
+            return rust_call("get_transaction_details", nlohmann::json(txhash_hex), m_session);
+        } catch (const std::exception& e) {
+            GDK_LOG_SEV(log_level::warning) << "Error fetching " << txhash_hex << " : " << e.what();
+            throw user_error("Transaction not found");
+        }
     }
 
     nlohmann::json ga_rust::create_transaction(const nlohmann::json& details)
@@ -477,32 +445,43 @@ namespace sdk {
         }
         GDK_LOG_SEV(log_level::debug) << "ga_rust::create_transaction result: " << result.dump();
 
-        return call_session("create_transaction", result);
+        return rust_call("create_transaction", result, m_session);
     }
 
-    nlohmann::json ga_rust::sign_transaction(const nlohmann::json& details)
+    nlohmann::json ga_rust::user_sign_transaction(const nlohmann::json& details)
     {
-        return call_session("sign_transaction", details);
+        return rust_call("sign_transaction", details, m_session);
+    }
+
+    nlohmann::json ga_rust::service_sign_transaction(
+        const nlohmann::json& details, const nlohmann::json& twofactor_data)
+    {
+        throw std::runtime_error("service_sign_transaction not implemented");
+    }
+
+    nlohmann::json ga_rust::psbt_sign(const nlohmann::json& details)
+    {
+        throw std::runtime_error("psbt_sign not implemented");
     }
 
     nlohmann::json ga_rust::send_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data)
     {
-        return call_session("send_transaction", details);
+        return rust_call("send_transaction", details, m_session);
     }
 
     std::string ga_rust::broadcast_transaction(const std::string& tx_hex)
     {
-        return call_session("broadcast_transaction", nlohmann::json(tx_hex)).get<std::string>();
+        return rust_call("broadcast_transaction", nlohmann::json(tx_hex), m_session).get<std::string>();
     }
 
     nlohmann::json ga_rust::create_pset(const nlohmann::json& details)
     {
-        return call_session("create_pset", details);
+        return rust_call("create_pset", details, m_session);
     }
 
     nlohmann::json ga_rust::sign_pset(const nlohmann::json& details)
     {
-        return call_session("sign_pset", details);
+        return rust_call("sign_pset", details, m_session);
     }
 
     void ga_rust::send_nlocktimes() { throw std::runtime_error("send_nlocktimes not implemented"); }
@@ -523,10 +502,13 @@ namespace sdk {
             { "memo", memo },
         });
 
-        call_session("set_transaction_memo", details);
+        rust_call("set_transaction_memo", details, m_session);
     }
 
-    nlohmann::json ga_rust::get_fee_estimates() { return call_session("get_fee_estimates", nlohmann::json({})); }
+    nlohmann::json ga_rust::get_fee_estimates()
+    {
+        return rust_call("get_fee_estimates", nlohmann::json({}), m_session);
+    }
 
     std::string ga_rust::get_system_message()
     {
@@ -549,16 +531,26 @@ namespace sdk {
         auto currency = amount_json.value("fiat_currency", "USD");
         auto fallback_rate = amount_json.value("fiat_rate", "");
         auto currency_query = nlohmann::json({ { "currencies", currency } });
-        auto xrates = call_session("exchange_rates", currency_query)["currencies"];
-        auto fetched_rate = xrates.value(currency, "");
+        std::string fetched_rate = "";
+        try {
+            auto xrates = rust_call("exchange_rates", currency_query, m_session)["currencies"];
+            fetched_rate = xrates.value(currency, "");
+        } catch (const std::exception& ex) {
+            GDK_LOG_SEV(log_level::warning) << "cannot fetch exchange rate " << ex.what();
+        }
         auto rate = fetched_rate.empty() ? fallback_rate : fetched_rate;
         return amount::convert(amount_json, currency, rate);
     }
 
-    amount ga_rust::get_min_fee_rate() const { throw std::runtime_error("get_min_fee_rate not implemented"); }
-    amount ga_rust::get_default_fee_rate() const { throw std::runtime_error("get_default_fee_rate not implemented"); }
-    uint32_t ga_rust::get_block_height() const { throw std::runtime_error("get_block_height not implemented"); }
-    amount ga_rust::get_dust_threshold() const { throw std::runtime_error("get_dust_threshold not implemented"); }
+    amount ga_rust::get_min_fee_rate() const { return amount(m_net_params.is_liquid() ? 100 : 1000); }
+    amount ga_rust::get_default_fee_rate() const
+    {
+        // TODO: Implement using a user block default setting when we have one
+        return get_min_fee_rate();
+    }
+    uint32_t ga_rust::get_block_height() const { return rust_call("get_block_height", {}, m_session); }
+    amount ga_rust::get_dust_threshold() const { return amount(546); }
+
     nlohmann::json ga_rust::get_spending_limits() const
     {
         throw std::runtime_error("get_spending_limits not implemented");
@@ -569,11 +561,7 @@ namespace sdk {
     }
 
     ga_pubkeys& ga_rust::get_ga_pubkeys() { throw std::runtime_error("get_ga_pubkeys not implemented"); }
-    user_pubkeys& ga_rust::get_user_pubkeys() { throw std::runtime_error("get_user_pubkeys not implemented"); }
-    ga_user_pubkeys& ga_rust::get_recovery_pubkeys()
-    {
-        throw std::runtime_error("get_recovery_pubkeys not implemented");
-    }
+    user_pubkeys& ga_rust::get_recovery_pubkeys() { throw std::runtime_error("get_recovery_pubkeys not implemented"); }
 
     void ga_rust::upload_confidential_addresses(
         uint32_t subaccount, const std::vector<std::string>& confidential_addresses)
@@ -582,11 +570,6 @@ namespace sdk {
     }
 
     void ga_rust::disable_all_pin_logins() {}
-
-    int32_t ga_rust::spv_verify_tx(const nlohmann::json& details)
-    {
-        return GDKRUST_spv_verify_tx(details.dump().c_str());
-    }
 
 } // namespace sdk
 } // namespace ga

@@ -7,10 +7,10 @@
 #include "amount.hpp"
 #include "boost_wrapper.hpp"
 #include "exception.hpp"
-#include "ga_session.hpp"
 #include "ga_strings.hpp"
 #include "ga_tx.hpp"
 #include "logging.hpp"
+#include "session_impl.hpp"
 #include "signer.hpp"
 #include "transaction_utils.hpp"
 #include "utils.hpp"
@@ -25,14 +25,34 @@ namespace sdk {
         static const std::string UTXO_SEL_DEFAULT("default"); // Use the default utxo selection strategy
         static const std::string UTXO_SEL_MANUAL("manual"); // Use manual utxo selection
 
-        static void add_paths(ga_session& session, nlohmann::json& utxo)
+        static const std::string ZEROS(64, '0');
+
+        static bool is_explicit(wally_tx_output output)
+        {
+            return output.asset_len == WALLY_TX_ASSET_CT_ASSET_LEN
+                && output.value_len == WALLY_TX_ASSET_CT_VALUE_UNBLIND_LEN;
+        }
+
+        static bool is_blinded(wally_tx_output output)
+        {
+            return output.asset_len == WALLY_TX_ASSET_CT_ASSET_LEN && output.value_len == WALLY_TX_ASSET_CT_VALUE_LEN
+                && output.nonce_len == WALLY_TX_ASSET_CT_NONCE_LEN && output.rangeproof_len > 0;
+        }
+
+        static void add_paths(session_impl& session, nlohmann::json& utxo)
         {
             const uint32_t subaccount = json_get_value(utxo, "subaccount", 0u);
             const uint32_t pointer = utxo.at("pointer");
+            const bool is_internal = utxo.value("is_internal", false);
 
             if (utxo.find("user_path") == utxo.end()) {
                 // Populate the full user path for h/w signing
-                utxo["user_path"] = session.get_subaccount_full_path(subaccount, pointer);
+                utxo["user_path"] = session.get_subaccount_full_path(subaccount, pointer, is_internal);
+            }
+
+            if (session.get_network_parameters().is_electrum()) {
+                // Electrum sessions currently only support single sig
+                return;
             }
 
             if (utxo.find("service_xpub") == utxo.end()) {
@@ -47,44 +67,37 @@ namespace sdk {
         }
 
         // Add a UTXO to a transaction. Returns the amount added
-        static amount add_utxo(ga_session& session, const wally_tx_ptr& tx, nlohmann::json& utxo)
+        static amount add_utxo(session_impl& session, const wally_tx_ptr& tx, nlohmann::json& utxo)
         {
             const std::string txhash = utxo.at("txhash");
             const auto txid = h2b_rev(txhash);
             const uint32_t index = utxo.at("pt_idx");
-            const auto type = script_type(utxo.at("script_type"));
             const bool low_r = session.get_nonnull_signer()->supports_low_r();
-            const uint32_t dummy_sig_type = low_r ? WALLY_TX_DUMMY_SIG_LOW_R : WALLY_TX_DUMMY_SIG;
-            const bool external = !json_get_value(utxo, "private_key").empty();
+            const bool is_external = !json_get_value(utxo, "private_key").empty();
             const uint32_t sequence = session.is_rbf_enabled() ? 0xFFFFFFFD : 0xFFFFFFFE;
 
             utxo["sequence"] = sequence;
 
-            if (external) {
-                tx_add_raw_input(
-                    tx, txid, index, sequence, dummy_external_input_script(low_r, h2b(utxo.at("public_key"))));
+            if (is_external) {
+                const auto script = dummy_external_input_script(low_r, h2b(utxo.at("public_key")));
+                tx_add_raw_input(tx, txid, index, sequence, script);
             } else {
                 // Populate the prevout script if missing so signing can use it later
                 if (utxo.find("prevout_script") == utxo.end()) {
                     const auto script = session.output_script_from_utxo(utxo);
                     utxo["prevout_script"] = b2h(script);
                 }
-                const auto script = h2b(utxo["prevout_script"]);
-
+                const auto script = h2b(utxo.at("prevout_script"));
                 add_paths(session, utxo);
 
-                wally_tx_witness_stack_ptr wit;
-
-                if (is_segwit_script_type(type)) {
+                if (is_segwit_address_type(utxo)) {
                     // TODO: If the UTXO is CSV and expired, spend it using the users key only (smaller)
-                    wit = tx_witness_stack_init(4);
+                    const uint32_t dummy_sig_type = low_r ? WALLY_TX_DUMMY_SIG_LOW_R : WALLY_TX_DUMMY_SIG;
+                    auto wit = tx_witness_stack_init(4);
                     tx_witness_stack_add_dummy(wit, WALLY_TX_DUMMY_NULL);
                     tx_witness_stack_add_dummy(wit, dummy_sig_type);
                     tx_witness_stack_add_dummy(wit, dummy_sig_type);
                     tx_witness_stack_add(wit, script);
-                }
-
-                if (wit) {
                     tx_add_raw_input(tx, txid, index, sequence, DUMMY_WITNESS_SCRIPT, wit);
                 } else {
                     tx_add_raw_input(tx, txid, index, sequence, dummy_input_script(low_r, script));
@@ -112,8 +125,7 @@ namespace sdk {
             // - 2of3 p2sh, backup key signing
             // - 2of3 p2wsh, backup key signing
             // - 2of2 csv, csv path
-            const auto type = script_type(utxo.at("script_type"));
-            if (!is_segwit_script_type(type)) {
+            if (!is_segwit_address_type(utxo)) {
                 // 2of2 p2sh: script sig: OP_0 <ga_sig> <user_sig>
                 // 2of3 p2sh: script sig: OP_0 <ga_sig> <user_sig>
                 const auto& input = tx->inputs[index];
@@ -131,7 +143,7 @@ namespace sdk {
             // Liquid outputs:
             // 2of2 csv:   witness stack: <user_sig> <ga_sig> <redeem_script> (not optimized)
             // 2of2 p2wsh: witness stack: <> <ga_sig> <user_sig> <redeem_script> (no recovery)
-            if (is_liquid && type == script_type::ga_redeem_p2sh_p2wsh_csv_fortified) {
+            if (is_liquid && utxo.at("address_type") == address_type::csv) {
                 std::swap(user_sig, ga_sig);
             }
 
@@ -179,8 +191,10 @@ namespace sdk {
         }
 
         // Check if a tx to bump is present, and if so add the details required to bump it
-        static std::pair<bool, bool> check_bump_tx(ga_session& session, nlohmann::json& result, uint32_t subaccount)
+        static std::pair<bool, bool> check_bump_tx(session_impl& session, nlohmann::json& result, uint32_t subaccount)
         {
+            const auto& net_params = session.get_network_parameters();
+            const bool is_electrum = net_params.is_electrum();
             const std::string policy_asset("btc"); // FIXME: Bump/CPFP for liquid
 
             if (result.find("previous_transaction") == result.end()) {
@@ -243,12 +257,11 @@ namespace sdk {
                 addressees.reserve(outputs.size());
                 uint32_t i = 0, change_index = NO_CHANGE_INDEX;
 
-                const auto& net_params = session.get_network_parameters();
                 for (const auto& output : outputs) {
-                    if (!output.at("address").empty()) {
+                    const std::string output_addr = output.at("address");
+                    if (!output_addr.empty()) {
                         // Validate address matches the transaction scriptpubkey
-                        const auto spk_from_address
-                            = scriptpubkey_from_address(net_params, session.get_block_height(), output["address"]);
+                        const auto spk_from_address = scriptpubkey_from_address(net_params, output_addr);
                         const auto& o = tx->outputs[i];
                         const auto spk_from_tx = gsl::make_span(o.script, o.script_len);
                         GDK_RUNTIME_ASSERT(static_cast<size_t>(spk_from_tx.size()) == spk_from_address.size());
@@ -258,12 +271,22 @@ namespace sdk {
                     const bool is_relevant = json_get_value(output, "is_relevant", false);
                     if (is_relevant) {
                         // Validate address is owned by the wallet
-                        const auto output_script = session.output_script_from_utxo(output);
-                        const std::string address
-                            = get_address_from_script(net_params, output_script, output.at("address_type"));
-                        GDK_RUNTIME_ASSERT(output["address"] == address);
+                        const auto address_type = output.at("address_type");
+                        std::string address;
+                        if (address_type == address_type::p2sh_p2wpkh || address_type == address_type::p2wpkh
+                            || address_type == address_type::p2pkh) {
+                            const auto pubkeys = session.pubkeys_from_utxo(output);
+                            address = get_address_from_public_key(net_params, pubkeys.at(0), address_type);
+                        } else {
+                            const auto output_script = session.output_script_from_utxo(output);
+                            address = get_address_from_script(net_params, output_script, address_type);
+                        }
+                        GDK_RUNTIME_ASSERT(output_addr == address);
                     }
-                    if (is_relevant && change_index == NO_CHANGE_INDEX) {
+                    // For singlesig, only consider internal addresses as change candidates
+                    const bool is_internal = json_get_value(output, "is_internal", false);
+                    const bool is_possible_change = is_relevant && (!is_electrum || is_internal);
+                    if (is_possible_change && change_index == NO_CHANGE_INDEX) {
                         // Change output.
                         change_index = i;
                     } else {
@@ -380,7 +403,7 @@ namespace sdk {
             return { is_rbf, is_cpfp };
         }
 
-        static void create_send_to_self(ga_session& session, uint32_t subaccount, nlohmann::json& result)
+        static void create_send_to_self(session_impl& session, uint32_t subaccount, nlohmann::json& result)
         {
             // Set addressees to a wallet address from the given subaccount
             const auto addr = session.get_receive_address({ { "subaccount", subaccount } });
@@ -390,10 +413,11 @@ namespace sdk {
             result["addressees"] = addressees;
         }
 
-        static void create_ga_transaction_impl(ga_session& session, nlohmann::json& result)
+        static void create_ga_transaction_impl(session_impl& session, nlohmann::json& result)
         {
             const auto& net_params = session.get_network_parameters();
             const bool is_liquid = net_params.is_liquid();
+            const bool is_electrum = net_params.is_electrum();
             const auto policy_asset = is_liquid ? net_params.policy_asset() : std::string("btc");
 
             result["error"] = std::string(); // Clear any previous error
@@ -523,7 +547,7 @@ namespace sdk {
             }
 
             if (is_liquid) {
-                if (asset_ids.size() > 1 && net_params.is_main_net()) {
+                if (asset_ids.size() > 1) {
                     set_tx_error(result, "Multi-asset send not supported");
                 }
                 have_assets = true;
@@ -611,7 +635,7 @@ namespace sdk {
                         = have_change_p != result.end() ? json_get_value(*have_change_p, policy_asset, false) : false;
                     if (have_change_output) {
                         const auto change_address = result.at("change_address").at(policy_asset).at("address");
-                        add_tx_output(net_params, session.get_block_height(), result, tx, change_address);
+                        add_tx_output(net_params, result, tx, change_address);
                         change_index = tx->num_outputs - 1;
                     }
                 }
@@ -639,17 +663,15 @@ namespace sdk {
                     // Find out where to send any change
                     const uint32_t change_subaccount = result.value("change_subaccount", subaccount);
                     result["change_subaccount"] = change_subaccount;
-                    auto change_address = session.get_receive_address({ { "subaccount", change_subaccount } });
-                    if (is_liquid) {
+                    nlohmann::json details = { { "subaccount", change_subaccount }, { "is_internal", true } };
+                    auto change_address = session.get_receive_address(details);
+
+                    if (is_liquid && !is_electrum) {
                         // set a temporary blinding key, will be changed later through the resolvers. we need
                         // to have one because all our create_transaction logic relies on being able to blind
                         // the tx for a few things (fee estimation for instance).
-                        const auto blinded_prefix = session.get_network_parameters().blinded_prefix();
-                        const auto public_key
-                            = h2b("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
-                        const auto& unblinded_addr = change_address.at("address");
-                        change_address["address"]
-                            = confidential_addr_from_addr(unblinded_addr, blinded_prefix, public_key);
+                        const char* pubkey_hex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+                        blind_address(net_params, change_address, pubkey_hex);
                         change_address["is_blinded"] = false;
                     }
 
@@ -765,8 +787,7 @@ namespace sdk {
                     // output to collect it, then loop again in case the amount
                     // this increases the fee by requires more UTXOs.
                     const auto change_address = result.at("change_address").at(asset_id).at("address");
-                    add_tx_output(net_params, session.get_block_height(), result, tx, change_address, is_liquid ? 1 : 0,
-                        asset_id);
+                    add_tx_output(net_params, result, tx, change_address, is_liquid ? 1 : 0, asset_id);
                     have_change_output = true;
                     change_index = tx->num_outputs - 1;
                     if (is_liquid && include_fee) {
@@ -871,31 +892,26 @@ namespace sdk {
         static std::string sign_input(
             session_impl& session, const wally_tx_ptr& tx, uint32_t index, const nlohmann::json& u)
         {
-            const auto txhash = u.at("txhash");
-            const uint32_t subaccount = json_get_value(u, "subaccount", 0u);
-            const uint32_t pointer = json_get_value(u, "pointer", 0u);
-            const auto type = script_type(u.at("script_type"));
-            const auto script = h2b(u.at("prevout_script"));
-            const std::string private_key = json_get_value(u, "private_key");
-            auto signer = session.get_nonnull_signer();
-            const bool low_r = signer->supports_low_r();
-
-            std::array<unsigned char, SHA256_LEN> tx_hash;
             const auto& net_params = session.get_network_parameters();
-            tx_hash = get_script_hash(net_params, u, tx, index);
+            const auto script_hash = get_script_hash(net_params, u, tx, index);
+            const std::string private_key_hex = json_get_value(u, "private_key");
 
-            if (!private_key.empty()) {
-                const auto private_key_bytes = h2b(private_key);
-                const auto user_sig = ec_sig_from_bytes(private_key_bytes, tx_hash);
+            if (!private_key_hex.empty()) {
+                const auto user_sig = ec_sig_from_bytes(h2b(private_key_hex), script_hash);
                 const auto der = ec_sig_to_der(user_sig, true);
                 tx_set_input_script(tx, index, scriptsig_p2pkh_from_der(h2b(u.at("public_key")), der));
                 return b2h(der);
             } else {
-                const auto path = session.get_subaccount_full_path(subaccount, pointer);
-                const auto user_sig = signer->sign_hash(path, tx_hash);
+                const auto script = h2b(u.at("prevout_script"));
+                const uint32_t subaccount = json_get_value(u, "subaccount", 0u);
+                const uint32_t pointer = json_get_value(u, "pointer", 0u);
+                const bool is_internal = json_get_value(u, "is_internal", false);
+                const auto path = session.get_subaccount_full_path(subaccount, pointer, is_internal);
+                auto signer = session.get_nonnull_signer();
+                const auto user_sig = signer->sign_hash(path, script_hash);
                 const auto der = ec_sig_to_der(user_sig, true);
 
-                if (is_segwit_script_type(type)) {
+                if (is_segwit_address_type(u)) {
                     // TODO: If the UTXO is CSV and expired, spend it using the users key only (smaller)
                     // Note that this requires setting the inputs sequence number to the CSV time too
                     auto wit = tx_witness_stack_init(1);
@@ -904,7 +920,8 @@ namespace sdk {
                     const uint32_t witness_ver = 0;
                     tx_set_input_script(tx, index, witness_script(script, witness_ver));
                 } else {
-                    tx_set_input_script(tx, index, input_script(low_r, script, user_sig));
+                    const bool is_low_r = signer->supports_low_r();
+                    tx_set_input_script(tx, index, input_script(is_low_r, script, user_sig));
                 }
                 return b2h(der);
             }
@@ -915,10 +932,8 @@ namespace sdk {
         const network_parameters& net_params, const nlohmann::json& utxo, const wally_tx_ptr& tx, size_t index)
     {
         const amount::value_type v = utxo.at("satoshi");
-        const auto type = script_type(utxo.at("script_type"));
         const auto script = h2b(utxo.at("prevout_script"));
-
-        const uint32_t flags = is_segwit_script_type(type) ? WALLY_TX_FLAG_USE_WITNESS : 0;
+        const uint32_t flags = is_segwit_address_type(utxo) ? WALLY_TX_FLAG_USE_WITNESS : 0;
 
         if (!net_params.is_liquid()) {
             const amount satoshi{ v };
@@ -936,7 +951,36 @@ namespace sdk {
         return tx_get_elements_signature_hash(tx, index, script, ct_value, WALLY_SIGHASH_ALL, flags);
     }
 
-    nlohmann::json create_ga_transaction(ga_session& session, const nlohmann::json& details)
+    void blind_address(
+        const network_parameters& net_params, nlohmann::json& addr, const std::string& blinding_pubkey_hex)
+    {
+        auto& address = addr.at("address");
+        addr["unblinded_address"] = address;
+        const std::string bech32_prefix = net_params.bech32_prefix();
+        const std::string blech32_prefix = net_params.blech32_prefix();
+        if (boost::starts_with(address.get<std::string>(), bech32_prefix)) {
+            address = confidential_addr_from_addr_segwit(
+                address, net_params.bech32_prefix(), blech32_prefix, blinding_pubkey_hex);
+        } else {
+            address = confidential_addr_from_addr(address, net_params.blinded_prefix(), blinding_pubkey_hex);
+        }
+        addr["blinding_key"] = blinding_pubkey_hex;
+        addr["is_blinded"] = true;
+    }
+
+    void unblind_address(const network_parameters& net_params, nlohmann::json& addr)
+    {
+        auto& address = addr.at("address");
+        const std::string blech32_prefix = net_params.blech32_prefix();
+        if (boost::starts_with(address.get<std::string>(), blech32_prefix)) {
+            address = confidential_addr_to_addr_segwit(address, blech32_prefix, net_params.bech32_prefix());
+        } else {
+            address = confidential_addr_to_addr(address, net_params.blinded_prefix());
+        }
+        addr["is_blinded"] = false;
+    }
+
+    nlohmann::json create_ga_transaction(session_impl& session, const nlohmann::json& details)
     {
         // Copy all inputs into our result (they will be overridden below as needed)
         nlohmann::json result(details);
@@ -957,18 +1001,36 @@ namespace sdk {
     {
         GDK_RUNTIME_ASSERT(json_get_value(u, "private_key").empty());
 
-        const auto type = script_type(u.at("script_type"));
         const auto script = h2b(u.at("prevout_script"));
         auto der = h2b(der_hex);
+        const auto addr_type = u.at("address_type");
 
-        if (is_segwit_script_type(type)) {
-            // See above re: spending using the users key only
+        if (addr_type == address_type::p2pkh) {
+            // Singlesig pre-segwit
+            tx_set_input_script(tx, index, scriptsig_p2pkh_from_der(h2b(u.at("public_key")), der));
+        } else if (addr_type == address_type::p2sh_p2wpkh || addr_type == address_type::p2wpkh) {
+            // Singlesig segwit
+            const auto public_key = h2b(u.at("public_key"));
+            auto wit = tx_witness_stack_init(2);
+            tx_witness_stack_add(wit, der);
+            tx_witness_stack_add(wit, public_key);
+            tx_set_input_witness(tx, index, wit);
+            if (addr_type == address_type::p2sh_p2wpkh) {
+                tx_set_input_script(tx, index, scriptsig_p2sh_p2wpkh_from_bytes(public_key));
+            } else {
+                // for native segwit ensure the scriptsig is empty
+                tx_set_input_script(tx, index, byte_span_t());
+            }
+        } else if (addr_type == address_type::csv || addr_type == address_type::p2wsh) {
+            // Multisig segwit
             auto wit = tx_witness_stack_init(1);
             tx_witness_stack_add(wit, der);
             tx_set_input_witness(tx, index, wit);
             const uint32_t witness_ver = 0;
             tx_set_input_script(tx, index, witness_script(script, witness_ver));
         } else {
+            // Multisig pre-segwit
+            GDK_RUNTIME_ASSERT(addr_type == address_type::p2sh);
             constexpr bool has_sighash = true;
             const auto user_sig = ec_sig_from_der(der, has_sighash);
             tx_set_input_script(tx, index, input_script(is_low_r, script, user_sig));
@@ -1012,7 +1074,7 @@ namespace sdk {
 
         size_t i = 0;
         for (const auto& utxo : inputs) {
-            sigs.emplace_back(sign_input(session, tx, i, utxo));
+            sigs.emplace_back(utxo.empty() ? std::string() : sign_input(session, tx, i, utxo));
             ++i;
         }
         return std::make_pair(sigs, std::move(tx));
@@ -1030,7 +1092,7 @@ namespace sdk {
         return result;
     }
 
-    nlohmann::json blind_ga_transaction(ga_session& session, const nlohmann::json& details)
+    nlohmann::json blind_ga_transaction(session_impl& session, const nlohmann::json& details)
     {
         const auto& net_params = session.get_network_parameters();
         GDK_RUNTIME_ASSERT(net_params.is_liquid());
@@ -1105,7 +1167,7 @@ namespace sdk {
             }
 
             const auto asset_id = h2b_rev(output.at("asset_id"));
-            const auto pub_key = h2b(output.at("public_key"));
+            const auto pub_key = h2b(output.at("blinding_key"));
             const uint64_t value = output.at("satoshi");
 
             const auto generator = asset_generator_from_bytes(asset_id, output_abfs[i]);
@@ -1161,7 +1223,7 @@ namespace sdk {
 
         const auto asset_id = h2b_rev(output.at("asset_id"));
         const auto script = h2b(output.at("script"));
-        const auto pub_key = h2b(output.at("public_key"));
+        const auto pub_key = h2b(output.at("blinding_key"));
         const uint64_t value = output.at("satoshi");
 
         const auto eph_keypair_sec = h2b(output.at("eph_keypair_sec"));
@@ -1175,6 +1237,51 @@ namespace sdk {
 
         tx_elements_output_commitment_set(
             tx, index, generator, value_commitment, eph_keypair_pub, surjectionproof, rangeproof);
+    }
+
+    nlohmann::json unblind_output(session_impl& session, const wally_tx_ptr& tx, uint32_t vout)
+    {
+        // FIXME: this is another place where unblinding is performed (the other is ga_session::unblind_utxo).
+        //        This is not ideal and we should aim to have a single place to perform unblinding,
+        //        but unfortunately it is quite complex so for now we have this duplication.
+        const auto& net_params = session.get_network_parameters();
+        GDK_RUNTIME_ASSERT(net_params.is_liquid());
+        GDK_RUNTIME_ASSERT(tx->num_outputs > vout);
+
+        nlohmann::json result = nlohmann::json::object();
+        const auto& o = tx->outputs[vout];
+        if (is_explicit(o)) {
+            result["satoshi"] = tx_confidential_value_to_satoshi(gsl::make_span(o.value, o.value_len));
+            result["assetblinder"] = ZEROS;
+            result["amountblinder"] = ZEROS;
+            GDK_RUNTIME_ASSERT(o.asset && *o.asset == 1);
+            result["asset_id"] = b2h_rev(gsl::make_span(o.asset, o.asset_len).subspan(1));
+        } else if (is_blinded(o)) {
+            const auto scriptpubkey = gsl::make_span(o.script, o.script_len);
+            const auto blinding_private_key = session.get_nonnull_signer()->get_blinding_key_from_script(scriptpubkey);
+            const auto asset_commitment = gsl::make_span(o.asset, o.asset_len);
+            const auto value_commitment = gsl::make_span(o.value, o.value_len);
+            const auto nonce_commitment = gsl::make_span(o.nonce, o.nonce_len);
+            const auto rangeproof = gsl::make_span(o.rangeproof, o.rangeproof_len);
+
+            unblind_t unblinded;
+            try {
+                unblinded = asset_unblind(blinding_private_key, rangeproof, value_commitment, nonce_commitment,
+                    scriptpubkey, asset_commitment);
+            } catch (const std::exception&) {
+                result["error"] = "failed to unblind utxo";
+                return result;
+            }
+            result["satoshi"] = std::get<3>(unblinded);
+            result["assetblinder"] = b2h_rev(std::get<2>(unblinded));
+            result["amountblinder"] = b2h_rev(std::get<1>(unblinded));
+            result["asset_id"] = b2h_rev(std::get<0>(unblinded));
+        } else {
+            // Mixed case is not handled
+            GDK_RUNTIME_ASSERT_MSG(false, "Output is not fully blinded or not fully explicit");
+        }
+
+        return result;
     }
 
 } // namespace sdk

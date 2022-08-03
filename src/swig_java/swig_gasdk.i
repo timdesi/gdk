@@ -1,6 +1,7 @@
 %module GDK
 %{
 #include "../../include/gdk.h"
+#include "../../include/greenlight.h"
 #include <limits.h>
 
 /* Make local functions visible to the O/S for better JVM stack traces */
@@ -498,19 +499,20 @@ LOCALFUNC jbyteArray create_array(JNIEnv *jenv, const unsigned char* p, size_t l
 %returns_void__(GA_destroy_session)
 %returns_void__(GA_destroy_auth_handler)
 %returns_void__(GA_destroy_json)
-%returns_void__(GA_disconnect)
+%returns_struct(GA_encrypt_with_pin, GA_auth_handler)
 %returns_void__(GA_reconnect_hint)
-%returns_string(GA_get_tor_socks5)
+%returns_struct(GA_get_proxy_settings, GA_json)
 %returns_struct(GA_get_wallet_identifier, GA_json)
 %returns_struct(GA_http_request, GA_json)
 %returns_struct(GA_refresh_assets, GA_json)
+%returns_struct(GA_get_assets, GA_json)
 %returns_struct(GA_validate_asset_domain_name, GA_json)
 %returns_string(GA_generate_mnemonic)
 %returns_string(GA_generate_mnemonic_12)
 %returns_struct(GA_get_available_currencies, GA_json)
 %returns_struct(GA_get_balance, GA_auth_handler)
+%returns_struct(GA_get_credentials, GA_auth_handler)
 %returns_struct(GA_get_fee_estimates, GA_json)
-%returns_string(GA_get_mnemonic_passphrase)
 %returns_struct(GA_get_networks, GA_json)
 %returns_struct(GA_get_previous_addresses, GA_auth_handler)
 %returns_array_(GA_get_random_bytes, 2, 3, jarg1)
@@ -535,12 +537,13 @@ LOCALFUNC jbyteArray create_array(JNIEnv *jenv, const unsigned char* p, size_t l
 %returns_struct(GA_set_csvtime, GA_auth_handler)
 %returns_struct(GA_set_nlocktime, GA_auth_handler)
 %returns_struct(GA_send_transaction, GA_auth_handler)
-%returns_struct(GA_set_pin, GA_json)
 %returns_void__(GA_disable_all_pin_logins)
 %returns_void__(GA_set_transaction_memo)
 %returns_void__(GA_set_watch_only)
 %returns_string(GA_get_watch_only_username)
 %returns_struct(GA_sign_transaction, GA_auth_handler)
+%returns_struct(GA_psbt_sign, GA_auth_handler)
+%returns_struct(GA_psbt_get_details, GA_auth_handler)
 %returns_void__(GA_auth_handler_call)
 %returns_struct(GA_twofactor_cancel_reset, GA_auth_handler)
 %returns_struct(GA_twofactor_reset, GA_auth_handler)
@@ -553,6 +556,8 @@ LOCALFUNC jbyteArray create_array(JNIEnv *jenv, const unsigned char* p, size_t l
 %returns_void__(GA_auth_handler_request_code)
 %returns_void__(GA_auth_handler_resolve_code)
 %returns_uint32(GA_validate_mnemonic)
+
+%returns_struct(GA_gl_call, GA_json)
 
 /* TODO
 GA_convert_json_value_to_bool

@@ -155,6 +155,12 @@ static std::vector<std::string> wamp_cert_pins = {
     // not before: Fri Sep  4 00:00:00 2020
     // not after: Mon Sep 15 16:00:00 2025
     "67add1166b020ae61b8f5fc96813c04c2aa589960796865572a3c7e737613dfd",
+
+    // subject: 'C=US, O=Google Trust Services LLC, CN=GTS CA 1D4'
+    // issuer: 'C=US, O=Google Trust Services LLC, CN=GTS Root R1'
+    // not before: 'Aug 13 00:00:42 2020 GMT'
+    // not after: 'Sep 30 00:00:42 2027 GMT'
+    "64e286b76063602a372efd60cde8db2656a49ee15e84254b3d6eb5fe38f4288b",
 };
 
 static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_networks = {
@@ -167,6 +173,10 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "development", true },
             { "electrum_tls", false },
             { "electrum_url", "localhost:19002" },
+            { "electrum_onion_url", std::string() },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", false },
             { "mainnet", false },
             { "max_reorg_blocks", 7 * 144u },
@@ -180,12 +190,13 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 0 }, // Enabled
             { "tx_explorer_url", std::string() },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", wamp_cert_roots },
             { "wamp_onion_url", std::string() },
-            { "wamp_url", "ws://localhost:8080/v2/ws" }
+            { "wamp_url", "ws://localhost:8080/v2/ws" },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
 
     { "liquid",
@@ -203,6 +214,10 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "development", false },
             { "electrum_tls", true },
             { "electrum_url", "blockstream.info:995" },
+            { "electrum_onion_url", "explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion:195" },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", true },
             { "mainnet", true },
             { "max_reorg_blocks", 2 },
@@ -217,12 +232,13 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", "https://blockstream.info/liquid/tx/" },
             { "wamp_cert_pins", wamp_cert_pins },
             { "wamp_cert_roots", wamp_cert_roots },
-            { "wamp_onion_url", "ws://liquidbtc7u746j4.onion/v2/ws" },
-            { "wamp_url", "wss://liquidwss.greenaddress.it/v2/ws" }
+            { "wamp_onion_url", "ws://liquidbtcgecscpokecnr5uwg2de55shdq7dnvlpzeju7tnefbekicqd.onion/v2/ws" },
+            { "wamp_url", "wss://green-liquid-mainnet.blockstream.com/v2/ws" },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
 
     { "localtest-liquid",
@@ -239,7 +255,11 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "ct_exponent", 0 },
             { "development", true },
             { "electrum_tls", false },
-            { "electrum_url", "localhost:50001" },
+            { "electrum_url", "localhost:19002" },
+            { "electrum_onion_url", std::string() },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", true },
             { "mainnet", false },
             { "max_reorg_blocks", 2 },
@@ -254,12 +274,13 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", std::string() },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", wamp_cert_roots },
             { "wamp_onion_url", std::string() },
-            { "wamp_url", "ws://localhost:8080/v2/ws" }
+            { "wamp_url", "ws://localhost:8080/v2/ws" },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
 
     { "testnet-liquid",
@@ -277,6 +298,10 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "development", false },
             { "electrum_tls", true },
             { "electrum_url", "blockstream.info:465" },
+            { "electrum_onion_url", "explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion:587" },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", true },
             { "mainnet", false },
             { "max_reorg_blocks", 2 },
@@ -291,12 +316,13 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", "https://esplora.blockstream.com/liquidtestnet/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", wamp_cert_roots },
             { "wamp_onion_url", "ws://liqtestulh46kwla3mgenugrcogvjjvzr2qdto663hujwnbaewzpkoad.onion/v2/ws" },
-            { "wamp_url", "wss://green-liquid-testnet.blockstream.com/v2/ws" }
+            { "wamp_url", "wss://green-liquid-testnet.blockstream.com/v2/ws" },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
 
     { "mainnet",
@@ -308,6 +334,10 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "development", false },
             { "electrum_tls", true },
             { "electrum_url", "blockstream.info:700" },
+            { "electrum_onion_url", "explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion:110" },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", false },
             { "mainnet", true },
             { "max_reorg_blocks", 144u },
@@ -321,12 +351,13 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 709776 }, // 144 Blocks following activation
             { "tx_explorer_url", "https://blockstream.info/tx/" },
             { "wamp_cert_pins", wamp_cert_pins },
             { "wamp_cert_roots", wamp_cert_roots },
-            { "wamp_onion_url", "ws://greenv3gx6c2gpsjzl6dkutrc7ruf36x44rbtmemw3pqia76elphbbad.onion:88/v2/ws" },
-            { "wamp_url", "wss://prodwss.greenaddress.it/v2/ws" }
+            { "wamp_onion_url", "ws://greenv32e5p4rax6dmfgb4zzl7kq2fbmizd7miyava2actplmipyx2qd.onion:80/v2/ws" },
+            { "wamp_url", "wss://green-bitcoin-mainnet.blockstream.com/v2/ws" },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
 
     { "testnet",
@@ -338,6 +369,10 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "development", false },
             { "electrum_tls", true },
             { "electrum_url", "blockstream.info:993" },
+            { "electrum_onion_url", "explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion:143" },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", false },
             { "mainnet", false },
             { "max_reorg_blocks", 7 * 144u },
@@ -351,15 +386,15 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 0 }, // Enabled
             { "tx_explorer_url", "https://blockstream.info/testnet/tx/" },
-            { "wamp_cert_pins", wamp_cert_pins },
+            { "wamp_cert_pins", nlohmann::json::array() },
             { "wamp_cert_roots", wamp_cert_roots },
-            { "wamp_onion_url", "ws://greent3qrtvm2qsqr6s6m4jy6curvmkeupn2gqai4u7x33fjfsyeysyd.onion:88/v2/ws" },
-            { "wamp_url", "wss://testwss.greenaddress.it/v2/ws" }
+            { "wamp_onion_url", "ws://greent5yfxruca52pkqjtgo2qdxijscqlastnv3jwzpmavvffdldm2yd.onion:80/v2/ws" },
+            { "wamp_url", "wss://green-bitcoin-testnet.blockstream.com/v2/ws" },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
 
-#ifdef BUILD_GDK_RUST
     { "electrum-liquid",
         std::make_shared<nlohmann::json>(nlohmann::json({
             { "address_explorer_url", "https://blockstream.info/liquid/address/" },
@@ -375,6 +410,10 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "development", false },
             { "electrum_tls", true },
             { "electrum_url", "blockstream.info:995" },
+            { "electrum_onion_url", "explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion:195" },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", true },
             { "mainnet", true },
             { "max_reorg_blocks", 2 },
@@ -389,12 +428,13 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", "https://blockstream.info/liquid/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
-            { "wamp_cert_roots", nlohmann::json::array() },
+            { "wamp_cert_roots", wamp_cert_roots },
             { "wamp_onion_url", std::string() },
-            { "wamp_url", std::string() }
+            { "wamp_url", std::string() },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
 
     { "electrum-localtest-liquid",
@@ -411,7 +451,11 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "ct_exponent", 0 },
             { "development", true },
             { "electrum_tls", false },
-            { "electrum_url", "localhost:50001" },
+            { "electrum_url", "localhost:19002" },
+            { "electrum_onion_url", std::string() },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", true },
             { "mainnet", false },
             { "max_reorg_blocks", 2 },
@@ -426,12 +470,13 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", std::string() },
             { "wamp_cert_pins", nlohmann::json::array() },
-            { "wamp_cert_roots", nlohmann::json::array() },
+            { "wamp_cert_roots", wamp_cert_roots },
             { "wamp_onion_url", std::string() },
-            { "wamp_url", std::string() }
+            { "wamp_url", std::string() },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
 
     { "electrum-mainnet",
@@ -443,6 +488,10 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "development", false },
             { "electrum_tls", true },
             { "electrum_url", "blockstream.info:700" },
+            { "electrum_onion_url", "explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion:110" },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", false },
             { "mainnet", true },
             { "max_reorg_blocks", 144u },
@@ -456,12 +505,13 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 709776 }, // 144 Blocks following activation
             { "tx_explorer_url", "https://blockstream.info/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
-            { "wamp_cert_roots", nlohmann::json::array() },
+            { "wamp_cert_roots", wamp_cert_roots },
             { "wamp_onion_url", std::string() },
             { "wamp_url", std::string() },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
 
     { "electrum-testnet",
@@ -473,6 +523,10 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "development", false },
             { "electrum_tls", true },
             { "electrum_url", "blockstream.info:993" },
+            { "electrum_onion_url", "explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion:143" },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", false },
             { "mainnet", false },
             { "max_reorg_blocks", 7 * 144u },
@@ -486,12 +540,13 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 0 }, // Enabled
             { "tx_explorer_url", "https://blockstream.info/testnet/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
-            { "wamp_cert_roots", nlohmann::json::array() },
+            { "wamp_cert_roots", wamp_cert_roots },
             { "wamp_onion_url", std::string() },
             { "wamp_url", std::string() },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
 
     { "electrum-localtest",
@@ -502,7 +557,11 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "csv_buckets", std::vector<uint32_t>() },
             { "development", true },
             { "electrum_tls", false },
-            { "electrum_url", "localhost:50001" },
+            { "electrum_url", "localhost:19002" },
+            { "electrum_onion_url", std::string() },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", false },
             { "mainnet", false },
             { "max_reorg_blocks", 7 * 144u },
@@ -516,12 +575,13 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 0 }, // Enabled
             { "tx_explorer_url", "http://127.0.0.1:8080/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
-            { "wamp_cert_roots", nlohmann::json::array() },
+            { "wamp_cert_roots", wamp_cert_roots },
             { "wamp_onion_url", std::string() },
             { "wamp_url", std::string() },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
 
     { "electrum-testnet-liquid",
@@ -539,6 +599,10 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "development", false },
             { "electrum_tls", true },
             { "electrum_url", "blockstream.info:465" },
+            { "electrum_onion_url", "explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion:587" },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
             { "liquid", true },
             { "mainnet", false },
             { "max_reorg_blocks", 2 },
@@ -553,14 +617,121 @@ static std::map<std::string, std::shared_ptr<nlohmann::json>> registered_network
             { "spv_multi", false },
             { "spv_servers", nlohmann::json::array() },
             { "spv_enabled", false },
-            { "taproot_enabled_at", 0xffffffff }, // Not yet enabled
             { "tx_explorer_url", "https://blockstream.info/liquidtestnet/tx/" },
             { "wamp_cert_pins", nlohmann::json::array() },
-            { "wamp_cert_roots", nlohmann::json::array() },
+            { "wamp_cert_roots", wamp_cert_roots },
             { "wamp_onion_url", std::string() },
-            { "wamp_url", std::string() }
+            { "wamp_url", std::string() },
+            { "greenlight_url", std::string() },
+            { "lightning", false },
         })) },
-#endif
+
+    /*
+    { "greenlight-mainnet",
+        std::make_shared<nlohmann::json>(nlohmann::json({
+            { "address_explorer_url", "https://blockstream.info/address/" },
+            { "bech32_prefix", "bc" },
+            { "bip21_prefix", "bitcoin" },
+            { "csv_buckets", std::vector<uint32_t>() },
+            { "development", false },
+            { "electrum_tls", true },
+            { "electrum_url", "blockstream.info:700" },
+            { "electrum_onion_url", "explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion:110" },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
+            { "liquid", false },
+            { "mainnet", true },
+            { "max_reorg_blocks", 144u },
+            { "name", "Bitcoin (Greenlight)" },
+            { "network", "greenlight-mainnet" },
+            { "p2pkh_version", 0u },
+            { "p2sh_version", 5u },
+            { "server_type", "greenlight" },
+            { "service_chain_code", std::string() },
+            { "service_pubkey", std::string() },
+            { "spv_multi", false },
+            { "spv_servers", nlohmann::json::array() },
+            { "spv_enabled", false },
+            { "tx_explorer_url", "https://blockstream.info/tx/" },
+            { "wamp_cert_pins", nlohmann::json::array() },
+            { "wamp_cert_roots", std::vector<std::string>() },
+            { "wamp_onion_url", std::string() },
+            { "wamp_url", std::string() },
+            { "greenlight_url", "https://scheduler.gl.blckstrm.com:2601" },
+            { "lightning", true },
+        })) },
+    */
+
+    { "greenlight-testnet",
+        std::make_shared<nlohmann::json>(nlohmann::json({
+            { "address_explorer_url", "https://blockstream.info/testnet/address/" },
+            { "bech32_prefix", "tb" },
+            { "bip21_prefix", "bitcoin" },
+            { "csv_buckets", std::vector<uint32_t>() },
+            { "development", false },
+            { "electrum_tls", true },
+            { "electrum_url", "blockstream.info:993" },
+            { "electrum_onion_url", "explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion:143" },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
+            { "liquid", false },
+            { "mainnet", false },
+            { "max_reorg_blocks", 7 * 144u },
+            { "name", "Testnet (Greenlight)" },
+            { "network", "greenlight-testnet" },
+            { "p2pkh_version", 111u },
+            { "p2sh_version", 196u },
+            { "server_type", "greenlight" },
+            { "service_chain_code", std::string() },
+            { "service_pubkey", std::string() },
+            { "spv_multi", false },
+            { "spv_servers", nlohmann::json::array() },
+            { "spv_enabled", false },
+            { "tx_explorer_url", "https://blockstream.info/testnet/tx/" },
+            { "wamp_cert_pins", nlohmann::json::array() },
+            { "wamp_cert_roots", std::vector<std::string>() },
+            { "wamp_onion_url", std::string() },
+            { "wamp_url", std::string() },
+            { "greenlight_url", "https://scheduler.testing.gl.blckstrm.com:2601" },
+            { "lightning", true },
+        })) },
+
+    { "greenlight-localtest",
+        std::make_shared<nlohmann::json>(nlohmann::json({
+            { "address_explorer_url", "http://127.0.0.1:8080/address/" },
+            { "bech32_prefix", "bcrt" },
+            { "bip21_prefix", "bitcoin" },
+            { "csv_buckets", std::vector<uint32_t>() },
+            { "development", true },
+            { "electrum_tls", false },
+            { "electrum_url", "localhost:19002" },
+            { "electrum_onion_url", std::string() },
+            { "pin_server_url", "https://jadepin.blockstream.com" },
+            { "pin_server_onion_url", "http://mrrxtq6tjpbnbm7vh5jt6mpjctn7ggyfy5wegvbeff3x7jrznqawlmid.onion" },
+            { "pin_server_public_key", "0332b7b1348bde8ca4b46b9dcc30320e140ca26428160a27bdbfc30b34ec87c547" },
+            { "liquid", false },
+            { "mainnet", false },
+            { "max_reorg_blocks", 7 * 144u },
+            { "name", "Localtest (Greenlight)" },
+            { "network", "greenlight-localtest" },
+            { "p2pkh_version", 111u },
+            { "p2sh_version", 196u },
+            { "server_type", "greenlight" },
+            { "service_chain_code", std::string() },
+            { "service_pubkey", std::string() },
+            { "spv_multi", false },
+            { "spv_servers", nlohmann::json::array() },
+            { "spv_enabled", false },
+            { "tx_explorer_url", "http://127.0.0.1:8080/tx/" },
+            { "wamp_cert_pins", nlohmann::json::array() },
+            { "wamp_cert_roots", std::vector<std::string>() },
+            { "wamp_onion_url", std::string() },
+            { "wamp_url", std::string() },
+            { "greenlight_url", "http://localhost:2601" },
+            { "lightning", true },
+        })) },
 };
 // clang-format on
 
@@ -570,6 +741,18 @@ static std::mutex registered_networks_mutex;
 namespace ga {
 namespace sdk {
     namespace {
+        static std::string get_url(
+            const nlohmann::json& details, const char* url_key, const char* onion_key, bool use_tor)
+        {
+            if (use_tor) {
+                std::string onion = details.at(onion_key);
+                if (!onion.empty()) {
+                    return onion;
+                }
+            }
+            return details.at(url_key);
+        }
+
         template <typename T>
         static void set_override(nlohmann::json& ret, const std::string& key, const nlohmann::json& src, T default_)
         {
@@ -582,7 +765,6 @@ namespace sdk {
             // Set override-able settings from the users parameters
             set_override(defaults, "electrum_tls", user_overrides, false);
             set_override(defaults, "electrum_url", user_overrides, std::string());
-            set_override(defaults, "log_level", user_overrides, "none");
             set_override(defaults, "spv_multi", user_overrides, false);
             set_override(defaults, "spv_servers", user_overrides, nlohmann::json::array());
             set_override(defaults, "spv_enabled", user_overrides, false);
@@ -590,7 +772,7 @@ namespace sdk {
             set_override(defaults, "user_agent", user_overrides, std::string());
             set_override(defaults, "cert_expiry_threshold", user_overrides, 1);
             set_override(defaults, "proxy", user_overrides, std::string());
-            defaults["state_dir"] = gdk_config().value("datadir", std::string{}) + "/state";
+            defaults["state_dir"] = gdk_config().value("datadir", std::string()) + "/state";
             return defaults;
         }
     } // namespace
@@ -663,21 +845,23 @@ namespace sdk {
     }
     std::string network_parameters::block_explorer_address() const { return m_details.at("address_explorer_url"); }
     std::string network_parameters::block_explorer_tx() const { return m_details.at("tx_explorer_url"); }
-    std::string network_parameters::asset_registry_url() const { return m_details.at("asset_registry_url"); }
-    std::string network_parameters::asset_registry_onion_url() const
-    {
-        return m_details.at("asset_registry_onion_url");
-    }
     std::string network_parameters::chain_code() const { return m_details.at("service_chain_code"); }
     bool network_parameters::electrum_tls() const { return m_details.at("electrum_tls"); }
-    std::string network_parameters::electrum_url() const { return m_details.at("electrum_url"); }
+    std::string network_parameters::electrum_url() const
+    {
+        return get_url(m_details, "electrum_url", "electrum_onion_url", use_tor());
+    }
+    std::string network_parameters::get_pin_server_url() const
+    {
+        return get_url(m_details, "pin_server_url", "pin_server_onion_url", use_tor());
+    }
+    std::string network_parameters::get_pin_server_public_key() const { return m_details.at("pin_server_public_key"); }
     std::string network_parameters::pub_key() const { return m_details.at("service_pubkey"); }
     std::string network_parameters::gait_onion() const { return m_details.at("wamp_onion_url"); }
     std::string network_parameters::policy_asset() const { return m_details.value("policy_asset", std::string()); }
     std::string network_parameters::bip21_prefix() const { return m_details.at("bip21_prefix"); }
     std::string network_parameters::bech32_prefix() const { return m_details.at("bech32_prefix"); }
     std::string network_parameters::blech32_prefix() const { return m_details.at("blech32_prefix"); }
-    std::string network_parameters::log_level() const { return m_details.value("log_level", "none"); }
     unsigned char network_parameters::btc_version() const { return m_details.at("p2pkh_version"); }
     unsigned char network_parameters::btc_p2sh_version() const { return m_details.at("p2sh_version"); }
     uint32_t network_parameters::blinded_prefix() const { return m_details.at("blinded_prefix"); }
@@ -685,15 +869,16 @@ namespace sdk {
     int network_parameters::ct_bits() const { return m_details.at("ct_bits"); }
     bool network_parameters::is_main_net() const { return m_details.at("mainnet"); }
     bool network_parameters::is_liquid() const { return m_details.value("liquid", false); }
+    bool network_parameters::is_development() const { return m_details.at("development"); }
     bool network_parameters::is_electrum() const { return m_details.value("server_type", std::string()) == "electrum"; }
+    bool network_parameters::is_lightning() const { return m_details.at("lightning"); }
     bool network_parameters::use_tor() const { return m_details.value("use_tor", false); }
-    std::string network_parameters::socks5() const { return m_details.value("socks5", std::string()); }
-    bool network_parameters::spv_enabled() const { return m_details.at("spv_enabled"); }
+    bool network_parameters::is_spv_enabled() const { return m_details.at("spv_enabled"); }
     std::string network_parameters::user_agent() const { return m_details.value("user_agent", std::string()); }
     std::string network_parameters::get_connection_string() const { return use_tor() ? gait_onion() : gait_wamp_url(); }
     std::string network_parameters::get_registry_connection_string() const
     {
-        return use_tor() ? asset_registry_onion_url() : asset_registry_url();
+        return get_url(m_details, "asset_registry_url", "asset_registry_onion_url", use_tor());
     }
     bool network_parameters::is_tls_connection() const
     {
@@ -711,6 +896,5 @@ namespace sdk {
     // a weeks worth of blocks without cache deletion, and for testnet still allows cache finalization
     // testing while being unnaffected by normal chain operation.
     uint32_t network_parameters::get_max_reorg_blocks() const { return m_details.at("max_reorg_blocks"); }
-    uint32_t network_parameters::get_taproot_enabled_at() const { return m_details.at("taproot_enabled_at"); }
 } // namespace sdk
 } // namespace ga

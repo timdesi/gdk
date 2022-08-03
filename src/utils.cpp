@@ -17,11 +17,9 @@
 
 #include "boost_wrapper.hpp"
 
+#include "../subprojects/gdk_rust/gdk_rust.h"
 #include "assertion.hpp"
 #include "exception.hpp"
-#ifdef BUILD_GDK_RUST
-#include "ga_rust.hpp"
-#endif
 #include "ga_strings.hpp"
 #include "ga_wally.hpp"
 #include "gsl_wrapper.hpp"
@@ -124,6 +122,61 @@ namespace sdk {
 
             return true;
         }
+
+        static std::pair<std::string, std::string> get_rust_exception_details(const nlohmann::json& details)
+        {
+            std::pair<std::string, std::string> ret;
+            if (!details.is_null()) {
+                try {
+                    ret.first = details.value("error", std::string());
+                    ret.second = details.value("message", std::string());
+                } catch (const std::exception&) {
+                    // Ignore
+                }
+            }
+            return ret;
+        }
+
+        static void check_rust_return_code(const int32_t return_code, const nlohmann::json& json)
+        {
+            if (return_code != GA_OK) {
+                switch (return_code) {
+                case GA_RECONNECT:
+                case GA_SESSION_LOST:
+                    throw reconnect_error();
+
+                case GA_TIMEOUT:
+                    throw timeout_error();
+
+                case GA_NOT_AUTHORIZED:
+                    throw login_error(get_rust_exception_details(json).second);
+
+                case GA_ERROR:
+                default:
+                    throw user_error(get_rust_exception_details(json).second);
+                }
+            }
+        }
+
+        static nlohmann::json rust_call_impl(const std::string& method, const nlohmann::json& input, void* session)
+        {
+            char* output = nullptr;
+            int ret;
+            if (session) {
+                ret = GDKRUST_call_session(session, method.c_str(), input.dump().c_str(), &output);
+            } else {
+                ret = GDKRUST_call(method.c_str(), input.dump().c_str(), &output);
+            }
+            nlohmann::json cppjson = nlohmann::json();
+            if (output) {
+                // output was set by calling `std::ffi::CString::into_raw`;
+                // parse it, then destroy it with GDKRUST_destroy_string.
+                cppjson = nlohmann::json::parse(output);
+                GDKRUST_destroy_string(output);
+            }
+            check_rust_return_code(ret, cppjson);
+            return cppjson;
+        }
     } // namespace
 
     // use the same strategy as bitcoin core
@@ -135,6 +188,7 @@ namespace sdk {
 
         // We only allow fetching up to 32 bytes of random data as bits beyond
         // this expose the final bytes of the sha512 we use to update curr_state.
+        GDK_RUNTIME_ASSERT(output_bytes);
         GDK_RUNTIME_ASSERT(num_bytes <= 32 && num_bytes <= siz);
 
         int64_t tsc = GetPerformanceCounter();
@@ -168,15 +222,59 @@ namespace sdk {
         wally_bzero(hashed.data(), hashed.size());
     }
 
-    int32_t spv_verify_tx(const nlohmann::json& details)
+    nlohmann::json rust_call(const std::string& method, const nlohmann::json& details, void* session)
     {
-#ifdef BUILD_GDK_RUST
-        return ga_rust::spv_verify_tx(details);
-#else
-        (void)details;
-        GDK_RUNTIME_ASSERT_MSG(false, "SPV not implemented");
-        return 0;
-#endif
+        return rust_call_impl(method, details, session);
+    }
+
+    void init_rust(const nlohmann::json& details) { rust_call("init", details); }
+
+    namespace {
+        static const std::array<const char*, 6> SPV_STATUS_NAMES
+            = { "in_progress", "verified", "not_verified", "disabled", "not_longest", "unconfirmed" };
+        static constexpr size_t SPV_STATUS_DISABLED = 3;
+
+        void write_length32(uint32_t len, std::vector<unsigned char>::iterator it)
+        {
+            *it++ = (unsigned char)(len >> 0);
+            *it++ = (unsigned char)(len >> 8);
+            *it++ = (unsigned char)(len >> 16);
+            *it = (unsigned char)(len >> 24);
+        }
+    } // namespace
+
+    uint32_t spv_verify_tx(const nlohmann::json& details)
+    {
+        try {
+            const size_t spv_status = rust_call("spv_verify_tx", details);
+            GDK_LOG_SEV(log_level::debug) << "spv_verify_tx:" << details.at("txid") << ":" << details.at("height")
+                                          << "=" << spv_get_status_string(spv_status);
+            return spv_status;
+        } catch (const std::exception& e) {
+            GDK_LOG_SEV(log_level::warning) << "spv_verify_tx exception:" << e.what();
+            return SPV_STATUS_DISABLED;
+        }
+    }
+
+    std::string spv_get_status_string(uint32_t spv_status)
+    {
+        GDK_RUNTIME_ASSERT_MSG(spv_status < SPV_STATUS_NAMES.size(), "Unknown SPV status");
+        return SPV_STATUS_NAMES[spv_status];
+    }
+
+    std::string psbt_extract_tx(const std::string& psbt)
+    {
+        auto psbt_hex = b2h(base64_to_bytes(psbt));
+        nlohmann::json details = { { "psbt_hex", std::move(psbt_hex) } };
+        return rust_call("psbt_extract_tx", details).at("transaction");
+    }
+
+    std::string psbt_merge_tx(const std::string& psbt, const std::string& tx_hex)
+    {
+        auto psbt_hex = b2h(base64_to_bytes(psbt));
+        nlohmann::json details = { { "psbt_hex", std::move(psbt_hex) }, { "transaction", tx_hex } };
+        auto result = rust_call("psbt_merge_tx", details);
+        return base64_from_bytes(h2b(result.at("psbt_hex")));
     }
 
     uint32_t get_uniform_uint32_t(uint32_t upper_bound)
@@ -212,8 +310,7 @@ namespace sdk {
         const auto ciphertext = gsl::make_span(entropy).first(32);
         const auto salt = gsl::make_span(entropy).last(4);
 
-        std::vector<unsigned char> derived(64);
-        scrypt(ustring_span(password), salt, 16384, 8, 8, derived);
+        const std::vector<unsigned char> derived = scrypt(ustring_span(password), salt);
 
         const auto key = gsl::make_span(derived).last(32);
         std::vector<unsigned char> plaintext(32);
@@ -238,8 +335,7 @@ namespace sdk {
         const auto sha_buffer = sha256d(plaintext);
         const auto salt = gsl::make_span(sha_buffer).first(4);
 
-        std::vector<unsigned char> derived(64);
-        scrypt(ustring_span(password), salt, 16384, 8, 8, derived);
+        const std::vector<unsigned char> derived = scrypt(ustring_span(password), salt);
         const auto derivedhalf1 = gsl::make_span(derived).first(32);
         const auto derivedhalf2 = gsl::make_span(derived).last(32);
 
@@ -255,6 +351,57 @@ namespace sdk {
         ciphertext.insert(ciphertext.end(), salt.begin(), salt.end());
 
         return bip39_mnemonic_from_bytes(ciphertext);
+    }
+
+    std::vector<unsigned char> get_wo_entropy(const std::string& username, const std::string& password)
+    {
+        // Initial entropy is scrypt(len(username) + username + password, "_wo_salt")
+        const std::string u_p = username + password;
+        std::vector<unsigned char> entropy;
+        entropy.resize(sizeof(uint32_t) + u_p.size());
+        write_length32(username.size(), entropy.begin());
+        std::copy(u_p.begin(), u_p.end(), entropy.begin() + sizeof(uint32_t));
+        return scrypt(entropy, signer::WATCH_ONLY_SALT);
+    }
+
+    std::pair<std::string, std::string> get_wo_credentials(byte_span_t entropy)
+    {
+        // Generate the watch only server username/password. Unlike non-blob
+        // watch only logins, we don't want the server to know the original
+        // username/password, since we use these to encrypt the client blob
+        // decryption key.
+        const auto u_blob = pbkdf2_hmac_sha512_256(entropy, signer::WO_SEED_U);
+        const auto p_blob = pbkdf2_hmac_sha512_256(entropy, signer::WO_SEED_P);
+        return { b2h(u_blob), b2h(p_blob) };
+    }
+
+    static pbkdf2_hmac256_t get_wo_blob_aes_key(byte_span_t entropy)
+    {
+        return pbkdf2_hmac_sha512_256(entropy, signer::WO_SEED_K);
+    }
+
+    std::string encrypt_wo_blob_key(byte_span_t entropy, const pbkdf2_hmac256_t& blob_key)
+    {
+        return aes_cbc_encrypt_to_hex(get_wo_blob_aes_key(entropy), blob_key);
+    }
+
+    pbkdf2_hmac256_t decrypt_wo_blob_key(byte_span_t entropy, const std::string& wo_blob_key_hex)
+    {
+        const auto decrypted = aes_cbc_decrypt_from_hex(get_wo_blob_aes_key(entropy), wo_blob_key_hex);
+        pbkdf2_hmac256_t encryption_key;
+        GDK_RUNTIME_ASSERT(decrypted.size() == encryption_key.size());
+        std::copy(decrypted.begin(), decrypted.end(), encryption_key.begin());
+        return encryption_key;
+    }
+
+    pub_key_t get_wo_local_encryption_key(byte_span_t entropy, const std::string& server_entropy)
+    {
+        GDK_RUNTIME_ASSERT(!server_entropy.empty());
+        pub_key_t encryption_key;
+        const auto key_bytes = pbkdf2_hmac_sha512(entropy, ustring_span(server_entropy));
+        std::copy(key_bytes.begin(), key_bytes.begin() + sizeof(pub_key_t), encryption_key.begin());
+        // Note that the pubkey data we return does not have to be valid
+        return encryption_key;
     }
 
     // Parse a bitcoin uri as described in bip21/72 and return the components
@@ -319,28 +466,36 @@ namespace sdk {
         return p == json.end() ? f() : h2b(p->get<std::string>());
     }
 
-    std::string aes_cbc_decrypt(
-        const std::array<unsigned char, PBKDF2_HMAC_SHA256_LEN>& key, const std::string& ciphertext)
+    std::vector<unsigned char> aes_cbc_decrypt(const pbkdf2_hmac256_t& key, byte_span_t ciphertext)
     {
-        const auto ciphertext_bytes = h2b(ciphertext);
-        const auto iv = gsl::make_span(ciphertext_bytes).first(AES_BLOCK_LEN);
-        const auto encrypted = gsl::make_span(ciphertext_bytes).subspan(AES_BLOCK_LEN);
+        const auto iv = ciphertext.first(AES_BLOCK_LEN);
+        const auto encrypted = ciphertext.subspan(AES_BLOCK_LEN);
         std::vector<unsigned char> plaintext(encrypted.size());
         aes_cbc(key, iv, encrypted, AES_FLAG_DECRYPT, plaintext);
         GDK_RUNTIME_ASSERT(plaintext.size() <= static_cast<size_t>(encrypted.size()));
-        return std::string(plaintext.begin(), plaintext.end());
+        return plaintext;
     }
 
-    std::string aes_cbc_encrypt(
-        const std::array<unsigned char, PBKDF2_HMAC_SHA256_LEN>& key, const std::string& plaintext)
+    std::vector<unsigned char> aes_cbc_decrypt_from_hex(const pbkdf2_hmac256_t& key, const std::string& ciphertext_hex)
+    {
+        const auto ciphertext = h2b(ciphertext_hex);
+        return aes_cbc_decrypt(key, ciphertext);
+    }
+
+    std::vector<unsigned char> aes_cbc_encrypt(const pbkdf2_hmac256_t& key, byte_span_t plaintext)
     {
         const auto iv = get_random_bytes<AES_BLOCK_LEN>();
         const size_t plaintext_padded_size = (plaintext.size() / AES_BLOCK_LEN + 1) * AES_BLOCK_LEN;
         std::vector<unsigned char> encrypted(AES_BLOCK_LEN + plaintext_padded_size);
-        aes_cbc(key, iv, ustring_span(plaintext), AES_FLAG_ENCRYPT, encrypted);
+        aes_cbc(key, iv, plaintext, AES_FLAG_ENCRYPT, encrypted);
         GDK_RUNTIME_ASSERT(encrypted.size() == plaintext_padded_size);
         encrypted.insert(std::begin(encrypted), iv.begin(), iv.end());
-        return b2h(encrypted);
+        return encrypted;
+    }
+
+    std::string aes_cbc_encrypt_to_hex(const pbkdf2_hmac256_t& key, byte_span_t plaintext)
+    {
+        return b2h(aes_cbc_encrypt(key, plaintext));
     }
 
     // Given a set of urls select the most appropriate
@@ -375,6 +530,25 @@ namespace sdk {
         } else {
             return insecure_urls[0];
         }
+    }
+
+    static const std::string SOCKS5("socks5://");
+    std::string socksify(const std::string& proxy)
+    {
+        std::string trimmed = boost::algorithm::trim_copy(proxy);
+        if (!trimmed.empty() && !boost::algorithm::starts_with(trimmed, SOCKS5)) {
+            return SOCKS5 + trimmed;
+        }
+        return trimmed;
+    }
+
+    std::string unsocksify(const std::string& proxy)
+    {
+        std::string trimmed = boost::algorithm::trim_copy(proxy);
+        if (boost::algorithm::starts_with(trimmed, SOCKS5)) {
+            trimmed.erase(0, SOCKS5.size());
+        }
+        return trimmed;
     }
 
     nlohmann::json parse_url(const std::string& url)
@@ -444,10 +618,7 @@ namespace sdk {
         // Initialise result with supplied prefix bytes and decompressed length
         result.resize(prefix_len + sizeof(uint32_t) + compressed_len);
         std::copy(prefix.begin(), prefix.end(), result.begin());
-        result[prefix_len + 0] = (unsigned char)(bytes_len >> 0);
-        result[prefix_len + 1] = (unsigned char)(bytes_len >> 8);
-        result[prefix_len + 2] = (unsigned char)(bytes_len >> 16);
-        result[prefix_len + 3] = (unsigned char)(bytes_len >> 24);
+        write_length32(bytes_len, result.begin() + prefix_len);
         // Add the compressed data
         int z_result = compress2(result.data() + prefix_len + sizeof(uint32_t), &compressed_len, bytes.data(),
             bytes_len, Z_BEST_COMPRESSION);
@@ -562,7 +733,7 @@ namespace sdk {
                 // Create a software signer to derive the master xpub
                 signer tmp_signer{ np, nlohmann::json(), params };
                 GDK_RUNTIME_ASSERT(!tmp_signer.is_watch_only());
-                bip32_xpub = tmp_signer.get_bip32_xpub(std::vector<uint32_t>());
+                bip32_xpub = tmp_signer.get_master_bip32_xpub();
             } else {
                 bip32_xpub = params.value("master_xpub", std::string());
             }
@@ -579,6 +750,27 @@ namespace sdk {
         }
         return { { "wallet_hash_id", get_wallet_hash_id(np, chain_code_hex, public_key_hex) } };
     }
+
+    bool nsee_log_info(std::string message, const char* context)
+    {
+        try {
+            // Remove any useless boost prefix and trailing newline
+            if (boost::algorithm::starts_with(message, "Throw location unknown")) {
+                message.erase(0, 62);
+            }
+            if (!message.empty() && message.back() == '\n') {
+                message.pop_back();
+            }
+        } catch (const std::exception&) {
+        }
+        GDK_LOG_SEV(log_level::info) << context << (*context ? " " : "") << "ignoring exception:" << message;
+        return true;
+    }
+
+    // For use in gdb as
+    // printf "%s", gdb_dump_json(<json_variable>).c_str()
+    std::string gdb_dump_json(const nlohmann::json& json) { return json.dump(4); }
+
 } // namespace sdk
 } // namespace ga
 
@@ -619,6 +811,9 @@ extern "C" int GA_generate_mnemonic_12(char** output) { return generate_mnemonic
 
 extern "C" int GA_validate_mnemonic(const char* mnemonic, uint32_t* valid)
 {
+    if (!mnemonic || !valid) {
+        return GA_ERROR; /* Invalid parameters */
+    }
     *valid = GA_FALSE;
     try {
         GDK_VERIFY(bip39_mnemonic_validate(nullptr, mnemonic));

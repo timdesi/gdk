@@ -15,13 +15,9 @@ else
     exit 1
 fi
 
-OPENSSL_NAME="openssl-OpenSSL_1_1_1g"
+OPENSSL_NAME="openssl-OpenSSL_1_1_1n"
 OPENSSL_OPTIONS="enable-ec_nistp_64_gcc_128 no-gost no-shared no-dso no-ssl2 no-ssl3 no-idea no-dtls no-dtls1 no-weak-ssl-ciphers no-comp -fvisibility=hidden no-err no-psk no-srp"
 OPENSSL_MOBILE="no-hw no-engine"
-
-if [ "$LTO" = "true" ]; then
-    OPENSSL_OPTIONS="$OPENSSL_OPTIONS -flto"
-fi
 
 if [ ! -d "${MESON_BUILD_ROOT}/openssl" ]; then
     cp -r "${MESON_SOURCE_ROOT}/subprojects/${OPENSSL_NAME}" "${MESON_BUILD_ROOT}/openssl"
@@ -34,8 +30,8 @@ if [ \( "$1" = "--ndk" \) ]; then
             OPENSSL_OPTIONS=$(echo $OPENSSL_OPTIONS | $SED -e "s/enable-ec_nistp_64_gcc_128//g")
     fi
     . ${MESON_SOURCE_ROOT}/tools/env.sh
-    $SED -ie "115s!\$triarch\-!!" "Configurations/15-android.conf"
-    $SED -ie "119s!\$triarch\-!!" "Configurations/15-android.conf"
+    $SED -ie "133s!\$triarch\-!!" "Configurations/15-android.conf"
+    $SED -ie "137s!\$triarch\-!!" "Configurations/15-android.conf"
     if [ $HOST_ARCH = "armeabi-v7a" ]; then
         OPENSSL_OPTIONS="$OPENSSL_OPTIONS no-asm"
     fi
@@ -58,9 +54,6 @@ elif [ \( "$1" = "--iphone" \) -o \( "$1" = "--iphonesim" \) ]; then
     else
         CONFIG_TARGET="ios64-cross"
         NOASM=
-        if [ "$LTO" = "true" ]; then
-            OPENSSL_OPTIONS="$OPENSSL_OPTIONS -fembed-bitcode"
-        fi
     fi
     KERNEL_BITS=64 ./Configure $CONFIG_TARGET $NOASM --prefix=$openssl_prefix $OPENSSL_OPTIONS $OPENSSL_MOBILE
     make depend
@@ -74,7 +67,8 @@ elif [ \( "$1" = "--windows" \) ]; then
     make install_sw
 else
     if [ "$(uname)" = "Darwin" ]; then
-        ./Configure darwin64-x86_64-cc --prefix="$openssl_prefix" $OPENSSL_OPTIONS -mmacosx-version-min=10.13
+        ARCH=$(uname -m)
+        ./Configure darwin64-$ARCH-cc --prefix="$openssl_prefix" $OPENSSL_OPTIONS -mmacosx-version-min=10.13
     else
         ./config --prefix="$openssl_prefix" $OPENSSL_OPTIONS
         $SED -ie "s!^CFLAG=!CFLAG=-fPIC -DPIC !" "Makefile"

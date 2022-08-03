@@ -12,60 +12,44 @@
 #include "client_blob.hpp"
 #include "ga_wally.hpp"
 #include "session_impl.hpp"
-#include "threading.hpp"
-
-using namespace std::literals;
 
 namespace ga {
 namespace sdk {
     struct cache;
-    struct websocketpp_gdk_config;
-    struct websocketpp_gdk_tls_config;
-    struct tor_controller;
-    struct network_control_context;
-    struct event_loop_controller;
-
-    using client = websocketpp::client<websocketpp_gdk_config>;
-    using client_tls = websocketpp::client<websocketpp_gdk_tls_config>;
-    using context_ptr = websocketpp::lib::shared_ptr<boost::asio::ssl::context>;
-    using wamp_session_ptr = std::shared_ptr<autobahn::wamp_session>;
+    class ga_user_pubkeys;
+    class wamp_transport;
 
     class ga_session final : public session_impl {
     public:
-        using transport_t = std::shared_ptr<autobahn::wamp_websocket_transport>;
-        using heartbeat_t = websocketpp::pong_timeout_handler;
         using nlocktime_t = std::map<std::string, nlohmann::json>; // txhash:pt_idx -> lock info
 
         explicit ga_session(network_parameters&& net_params);
         ~ga_session();
 
+        void connect();
+        void reconnect();
+        void reconnect_hint(const nlohmann::json& hint);
+        void disconnect();
+
+        void emit_notification(nlohmann::json details, bool async);
+
         nlohmann::json register_user(const std::string& master_pub_key_hex, const std::string& master_chain_code_hex,
             const std::string& gait_path_hex, bool supports_csv);
 
-        void connect();
-        void try_reconnect();
-        void reconnect_hint(bool enabled, bool restarted);
-        std::string get_tor_socks5();
-        void tor_sleep_hint(const std::string& hint);
-
-        void set_heartbeat_timeout_handler(heartbeat_t handler);
-        void set_ping_fail_handler(ping_fail_t handler);
-
-        nlohmann::json http_request(nlohmann::json params);
-        nlohmann::json refresh_assets(const nlohmann::json& params);
         nlohmann::json validate_asset_domain_name(const nlohmann::json& params);
 
         std::string get_challenge(const pub_key_t& public_key);
         nlohmann::json authenticate(const std::string& sig_der_hex, const std::string& path_hex,
             const std::string& root_bip32_xpub, std::shared_ptr<signer> signer);
 
-        void register_subaccount_xpubs(const std::vector<std::string>& bip32_xpubs);
+        void register_subaccount_xpubs(
+            const std::vector<uint32_t>& pointers, const std::vector<std::string>& bip32_xpubs);
 
-        std::string mnemonic_from_pin_data(const nlohmann::json& pin_data);
-        nlohmann::json login_watch_only(std::shared_ptr<signer> signer);
+        nlohmann::json credentials_from_pin_data(const nlohmann::json& pin_data);
+        nlohmann::json login_wo(std::shared_ptr<signer> signer);
 
-        bool set_watch_only(const std::string& username, const std::string& password);
-        std::string get_watch_only_username();
+        bool set_wo_credentials(const std::string& username, const std::string& password);
+        std::string get_wo_username();
         bool remove_account(const nlohmann::json& twofactor_data);
 
         template <typename T>
@@ -73,6 +57,7 @@ namespace sdk {
         void change_settings_limits(const nlohmann::json& details, const nlohmann::json& twofactor_data);
 
         nlohmann::json get_subaccounts();
+        std::vector<uint32_t> get_subaccount_pointers();
         nlohmann::json get_subaccount(uint32_t subaccount);
         void rename_subaccount(uint32_t subaccount, const std::string& new_name);
         void set_subaccount_hidden(uint32_t subaccount, bool is_hidden);
@@ -80,11 +65,12 @@ namespace sdk {
         nlohmann::json create_subaccount(const nlohmann::json& details, uint32_t subaccount);
         nlohmann::json create_subaccount(const nlohmann::json& details, uint32_t subaccount, const std::string& xpub);
         nlohmann::json get_receive_address(const nlohmann::json& details);
-        nlohmann::json get_previous_addresses(uint32_t subaccount, uint32_t last_pointer);
+        nlohmann::json get_previous_addresses(const nlohmann::json& details);
         void set_local_encryption_keys(const pub_key_t& public_key, std::shared_ptr<signer> signer);
         nlohmann::json get_available_currencies() const;
         bool is_rbf_enabled() const;
         bool is_watch_only() const;
+        void ensure_full_session();
 
         nlohmann::json get_twofactor_config(bool reset_cached);
         nlohmann::json get_twofactor_config(locker_t& locker, bool reset_cached = false);
@@ -114,7 +100,7 @@ namespace sdk {
 
         nlohmann::json cancel_twofactor_reset(const nlohmann::json& twofactor_data);
 
-        nlohmann::json set_pin(const std::string& mnemonic, const std::string& pin, const std::string& device_id);
+        nlohmann::json encrypt_with_pin(const nlohmann::json& details);
         void disable_all_pin_logins();
 
         nlohmann::json get_unspent_outputs(const nlohmann::json& details, unique_pubkeys_and_scripts_t& missing);
@@ -123,9 +109,12 @@ namespace sdk {
             const std::string& private_key, const std::string& password, uint32_t unused);
         nlohmann::json set_unspent_outputs_status(const nlohmann::json& details, const nlohmann::json& twofactor_data);
         wally_tx_ptr get_raw_transaction_details(const std::string& txhash_hex) const;
+        nlohmann::json get_transaction_details(const std::string& txhash_hex) const;
 
         nlohmann::json create_transaction(const nlohmann::json& details);
-        nlohmann::json sign_transaction(const nlohmann::json& details);
+        nlohmann::json user_sign_transaction(const nlohmann::json& details);
+        nlohmann::json service_sign_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data);
+        nlohmann::json psbt_sign(const nlohmann::json& details);
         nlohmann::json send_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data);
         std::string broadcast_transaction(const std::string& tx_hex);
 
@@ -150,8 +139,13 @@ namespace sdk {
 
         nlohmann::json convert_amount(const nlohmann::json& amount_json) const;
 
-        bool set_blinding_nonce(
-            const std::string& pubkey_hex, const std::string& script_hex, const std::string& nonce_hex);
+        bool encache_blinding_data(const std::string& pubkey_hex, const std::string& script_hex,
+            const std::string& nonce_hex, const std::string& blinding_pubkey_hex);
+        void encache_scriptpubkey_data(byte_span_t scriptpubkey, uint32_t subaccount, uint32_t branch, uint32_t pointer,
+            uint32_t subtype, uint32_t script_type);
+        void encache_new_scriptpubkeys(uint32_t subaccount);
+        nlohmann::json get_scriptpubkey_data(byte_span_t scriptpubkey);
+        nlohmann::json psbt_get_details(const nlohmann::json& details);
 
         amount get_min_fee_rate() const;
         amount get_default_fee_rate() const;
@@ -160,14 +154,11 @@ namespace sdk {
         nlohmann::json get_spending_limits() const;
         bool is_spending_limits_decrease(const nlohmann::json& details);
 
-        void emit_notification(nlohmann::json details, bool async);
-
         ga_pubkeys& get_ga_pubkeys();
-        user_pubkeys& get_user_pubkeys();
-        ga_user_pubkeys& get_recovery_pubkeys();
+        user_pubkeys& get_recovery_pubkeys();
         bool has_recovery_pubkeys_subaccount(uint32_t subaccount);
         std::vector<uint32_t> get_subaccount_root_path(uint32_t subaccount);
-        std::vector<uint32_t> get_subaccount_full_path(uint32_t subaccount, uint32_t pointer);
+        std::vector<uint32_t> get_subaccount_full_path(uint32_t subaccount, uint32_t pointer, bool is_internal);
         std::string get_service_xpub(uint32_t subaccount);
         std::string get_recovery_xpub(uint32_t subaccount);
 
@@ -188,28 +179,31 @@ namespace sdk {
         void reset_cached_session_data(locker_t& locker);
         void delete_reorg_block_txs(locker_t& locker, bool from_latest_cached);
         void reset_all_session_data(bool in_dtor);
+        void set_local_encryption_keys_impl(
+            locker_t& locker, const pub_key_t& public_key, std::shared_ptr<signer> signer);
 
-        bool is_connected() const;
-        bool reconnect();
-        void stop_reconnect();
-
+        void get_cached_client_blob(const std::string& server_hmac);
         void load_client_blob(locker_t& locker, bool encache);
         bool save_client_blob(locker_t& locker, const std::string& old_hmac);
-        void encache_client_blob(locker_t& locker, const std::vector<unsigned char>& data);
+        void encache_client_blob(locker_t& locker, const std::vector<unsigned char>& data, const std::string& hmac);
         void update_blob(locker_t& locker, std::function<bool()> update_fn);
 
         void load_signer_xpubs(locker_t& locker, std::shared_ptr<signer> signer);
 
         void ack_system_message(locker_t& locker, const std::string& message_hash_hex, const std::string& sig_der_hex);
 
+        nlohmann::json sign_or_send_tx(
+            const nlohmann::json& details, const nlohmann::json& twofactor_data, bool is_send);
         nlohmann::json get_appearance() const;
         bool subaccount_allows_csv(uint32_t subaccount) const;
         const std::string& get_default_address_type(uint32_t) const;
         void push_appearance_to_server(locker_t& locker) const;
         void set_twofactor_config(locker_t& locker, const nlohmann::json& config);
         bool is_twofactor_reset_active(session_impl::locker_t& locker);
-        nlohmann::json set_twofactor_reset_config(const autobahn::wamp_call_result& server_result);
+        nlohmann::json set_twofactor_reset_config(const nlohmann::json& config);
         void set_enabled_twofactor_methods(locker_t& locker);
+        nlohmann::json authenticate_wo(locker_t& locker, const std::string& username, const std::string& password,
+            const std::string& user_agent, bool with_blob);
         nlohmann::json on_post_login(locker_t& locker, nlohmann::json& login_data, const std::string& root_bip32_xpub,
             bool watch_only, bool is_initial_login);
         void update_fiat_rate(locker_t& locker, const std::string& rate_str);
@@ -220,8 +214,11 @@ namespace sdk {
         nlohmann::json get_settings(locker_t& locker);
         bool unblind_utxo(locker_t& locker, nlohmann::json& utxo, const std::string& for_txhash,
             unique_pubkeys_and_scripts_t& missing);
+        std::vector<unsigned char> get_alternate_blinding_nonce(
+            locker_t& locker, nlohmann::json& utxo, const std::vector<unsigned char>& nonce_commitment);
         bool cleanup_utxos(session_impl::locker_t& locker, nlohmann::json& utxos, const std::string& for_txhash,
             unique_pubkeys_and_scripts_t& missing);
+        std::vector<unsigned char> output_script_from_utxo(session_impl::locker_t& locker, const nlohmann::json& utxo);
 
         std::unique_ptr<locker_t> get_multi_call_locker(uint32_t category_flags, bool wait_for_lock);
         void on_new_transaction(const std::vector<uint32_t>& subaccounts, nlohmann::json details);
@@ -249,69 +246,21 @@ namespace sdk {
 
         void save_cache();
 
-        context_ptr tls_init_handler_impl(
-            const std::string& host_name, const std::vector<std::string>& roots, const std::vector<std::string>& pins);
-
-        void make_client();
-        void make_transport();
-
-        bool ping() const;
-
-        void set_socket_options();
-        void start_ping_timer();
-        void disconnect();
-
-        autobahn::wamp_subscription subscribe(
-            locker_t& locker, const std::string& topic, const autobahn::wamp_event_handler& callback);
         void subscribe_all(locker_t& locker);
-        void unsubscribe();
-
-        // Make a background WAMP call and return its result to the current thread.
-        // The session mutex must not be held when calling this function.
-        template <typename... Args>
-        autobahn::wamp_call_result wamp_call(const std::string& method_name, Args&&... args) const
-        {
-            const std::string method{ m_wamp_call_prefix + method_name };
-            auto fn = m_session->call(method, std::make_tuple(std::forward<Args>(args)...), m_wamp_call_options);
-            return wamp_process_call(fn);
-        }
-
-        // Make a WAMP call on a currently locked session.
-        template <typename... Args>
-        autobahn::wamp_call_result wamp_call(locker_t& locker, const std::string& method_name, Args&&... args) const
-        {
-            unique_unlock unlocker(locker);
-            return wamp_call(method_name, std::forward<Args>(args)...);
-        }
-
-        autobahn::wamp_call_result wamp_process_call(boost::future<autobahn::wamp_call_result>& fn) const;
 
         std::vector<unsigned char> get_pin_password(const std::string& pin, const std::string& pin_identifier);
 
-        void ping_timer_handler(const boost::system::error_code& ec);
+        // Start/stop background header downloads
+        void download_headers_ctl(locker_t& locker, bool do_start);
+        void download_headers_thread_fn();
 
-        std::string m_proxy;
-        const bool m_has_network_proxy;
-
-        boost::asio::io_context m_io;
-        boost::variant<std::unique_ptr<client>, std::unique_ptr<client_tls>> m_client;
-        transport_t m_transport;
-        wamp_session_ptr m_session;
-        std::vector<autobahn::wamp_subscription> m_subscriptions;
-        heartbeat_t m_heartbeat_handler;
-        ping_fail_t m_ping_fail_handler;
-
-        boost::asio::deadline_timer m_ping_timer;
-
-        std::unique_ptr<network_control_context> m_network_control;
-        boost::asio::thread_pool m_pool;
-
+        const bool m_spv_enabled;
         nlohmann::json m_login_data;
         boost::optional<pbkdf2_hmac512_t> m_local_encryption_key;
         client_blob m_blob;
         std::string m_blob_hmac;
-        boost::optional<std::array<unsigned char, 32>> m_blob_aes_key;
-        boost::optional<std::array<unsigned char, 32>> m_blob_hmac_key;
+        boost::optional<pbkdf2_hmac256_t> m_blob_aes_key;
+        boost::optional<pbkdf2_hmac256_t> m_blob_hmac_key;
         bool m_blob_outdated;
         std::array<uint32_t, 32> m_gait_path;
         nlohmann::json m_limits_data;
@@ -329,7 +278,6 @@ namespace sdk {
 
         std::map<uint32_t, nlohmann::json> m_subaccounts; // Includes 0 for main
         std::unique_ptr<ga_pubkeys> m_ga_pubkeys;
-        std::unique_ptr<user_pubkeys> m_user_pubkeys;
         std::unique_ptr<ga_user_pubkeys> m_recovery_pubkeys;
         uint32_t m_next_subaccount;
         std::vector<uint32_t> m_fee_estimates;
@@ -346,15 +294,17 @@ namespace sdk {
         uint32_t m_multi_call_category;
         std::shared_ptr<nlocktime_t> m_nlocktimes;
 
-        std::shared_ptr<tor_controller> m_tor_ctrl;
-        std::string m_last_tor_socks5;
         std::shared_ptr<cache> m_cache;
         std::set<uint32_t> m_synced_subaccounts;
         const std::string m_user_agent;
+        std::unique_ptr<wamp_transport> m_wamp;
 
-        autobahn::wamp_call_options m_wamp_call_options;
-        const std::string m_wamp_call_prefix;
-        std::unique_ptr<event_loop_controller> m_controller;
+        // SPV header downloading
+        std::shared_ptr<std::thread> m_spv_thread; // Header download thread
+        std::atomic_bool m_spv_thread_done; // True when m_spv_thread has exited
+        std::atomic_bool m_spv_thread_stop; // True when we want m_spv_thread to stop
+        // Txs that are SPV verified but not yet confirmed beyond the reorg limit
+        std::set<std::string> m_spv_verified_txs;
     };
 
 } // namespace sdk

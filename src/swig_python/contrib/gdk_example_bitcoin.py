@@ -19,7 +19,10 @@ def main():
     # login_with_pin methods. The example uses Bitcoin's testnet.
 
     # Initialize GDK.
-    gdk.init({})
+    gdk.init({
+        'datadir': '.',     # Use the current directory for any state files
+        'log_level': 'warn'
+    })
 
     # Wallet creation and login using Mnemonic
     # ========================================
@@ -138,8 +141,8 @@ class gdk_wallet:
         self.mnemonic = mnemonic or gdk.generate_mnemonic()
         # Session network name options are: testnet, mainnet.
         self.session = gdk.Session({'name': 'testnet'})
-        self.session.register_user({}, self.mnemonic).resolve()
-        credentials = {'mnemonic': self.mnemonic, 'password': ''}
+        credentials = {'mnemonic': self.mnemonic}
+        self.session.register_user({}, credentials).resolve()
         self.session.login_user({}, credentials).resolve()
         self.fetch_block_height()
         if create_with_2fa_enabled:
@@ -184,8 +187,9 @@ class gdk_wallet:
         self.last_block_height = 0
 
     def set_pin(self, mnemonic, pin):
-        pin_data = gdk.set_pin(self.session.session_obj, mnemonic, str(pin), str('device_id_1'))
-        open(self.PIN_DATA_FILENAME, 'w').write(pin_data)
+        details = {'pin': str(pin), 'plaintext': {'mnemonic': mnemonic}}
+        pin_data = self.session.encrypt_with_pin(details).resolve()
+        open(self.PIN_DATA_FILENAME, 'w').write(json.dumps(pin_data))
         return pin_data
 
     def get_balance(self):

@@ -5,6 +5,13 @@
 #include "memory.hpp"
 #include "utils.hpp"
 
+#define VERIFY_MNEMONIC(x)                                                                                             \
+    do {                                                                                                               \
+        if ((x) != WALLY_OK) {                                                                                         \
+            throw user_error(res::id_invalid_mnemonic);                                                                \
+        }                                                                                                              \
+    } while (false)
+
 namespace ga {
 namespace sdk {
 
@@ -59,11 +66,10 @@ namespace sdk {
         return ret;
     }
 
-    std::array<unsigned char, PBKDF2_HMAC_SHA256_LEN> pbkdf2_hmac_sha512_256(
-        byte_span_t password, byte_span_t salt, uint32_t cost)
+    pbkdf2_hmac256_t pbkdf2_hmac_sha512_256(byte_span_t password, byte_span_t salt, uint32_t cost)
     {
         auto tmp = pbkdf2_hmac_sha512(password, salt, cost);
-        std::array<unsigned char, PBKDF2_HMAC_SHA256_LEN> out;
+        pbkdf2_hmac256_t out;
         std::copy(std::begin(tmp), std::begin(tmp) + out.size(), std::begin(out));
         wally_bzero(tmp.data(), tmp.size());
         return out;
@@ -170,6 +176,12 @@ namespace sdk {
         return out;
     }
 
+    std::vector<unsigned char> scriptsig_p2sh_p2wpkh_from_bytes(byte_span_t public_key)
+    {
+        const uint32_t witness_ver = 0;
+        return witness_program_from_bytes(public_key, witness_ver, WALLY_SCRIPT_HASH160 | WALLY_SCRIPT_AS_PUSH);
+    }
+
     void scriptpubkey_csv_2of2_then_1_from_bytes(
         byte_span_t keys, uint32_t csv_blocks, bool optimize, std::vector<unsigned char>& out)
     {
@@ -228,6 +240,16 @@ namespace sdk {
         return csv_blocks;
     }
 
+    ecdsa_sig_t get_sig_from_p2pkh_script_sig(byte_span_t script_sig)
+    {
+        // <user_sig> <pubkey>
+        constexpr bool has_sighash = true;
+        size_t push_len = script_sig.at(0);
+        GDK_RUNTIME_ASSERT(push_len && push_len <= EC_SIGNATURE_DER_MAX_LEN + 1);
+        GDK_RUNTIME_ASSERT(static_cast<size_t>(script_sig.size()) >= push_len + 2);
+        return ec_sig_from_der(script_sig.subspan(1, push_len), has_sighash);
+    }
+
     std::vector<ecdsa_sig_t> get_sigs_from_multisig_script_sig(byte_span_t script_sig)
     {
         constexpr bool has_sighash = true;
@@ -265,6 +287,17 @@ namespace sdk {
         out.resize(written);
     }
 
+    std::vector<unsigned char> script_push_from_bytes(byte_span_t data)
+    {
+        std::vector<unsigned char> ret(data.size() + 5); // 5 = OP_PUSHDATA4 + 4 byte size
+        const uint32_t flags = 0;
+        size_t written;
+        GDK_VERIFY(wally_script_push_from_bytes(data.data(), data.size(), flags, &ret[0], ret.size(), &written));
+        GDK_RUNTIME_ASSERT(written <= ret.size());
+        ret.resize(written);
+        return ret;
+    }
+
     std::vector<unsigned char> scriptpubkey_p2pkh_from_hash160(byte_span_t hash)
     {
         GDK_RUNTIME_ASSERT(hash.size() == HASH160_LEN);
@@ -275,6 +308,12 @@ namespace sdk {
         return ret;
     }
 
+    std::vector<unsigned char> scriptpubkey_p2pkh_from_public_key(byte_span_t public_key)
+    {
+        GDK_VERIFY(wally_ec_public_key_verify(public_key.data(), public_key.size()));
+        return scriptpubkey_p2pkh_from_hash160(hash160(public_key));
+    }
+
     std::vector<unsigned char> scriptpubkey_p2sh_from_hash160(byte_span_t hash)
     {
         GDK_RUNTIME_ASSERT(hash.size() == HASH160_LEN);
@@ -283,6 +322,13 @@ namespace sdk {
         GDK_VERIFY(wally_scriptpubkey_p2sh_from_bytes(hash.data(), hash.size(), 0, &ret[0], ret.size(), &written));
         GDK_RUNTIME_ASSERT(written == WALLY_SCRIPTPUBKEY_P2SH_LEN);
         return ret;
+    }
+
+    std::vector<unsigned char> scriptpubkey_p2sh_p2wsh_from_bytes(byte_span_t script)
+    {
+        const uint32_t witness_ver = 0;
+        const auto witness_program = witness_program_from_bytes(script, witness_ver, WALLY_SCRIPT_SHA256);
+        return scriptpubkey_p2sh_from_hash160(hash160(witness_program));
     }
 
     std::vector<unsigned char> witness_program_from_bytes(byte_span_t script, uint32_t witness_ver, uint32_t flags)
@@ -310,18 +356,19 @@ namespace sdk {
 
     std::string electrum_script_hash_hex(byte_span_t script_bytes) { return b2h_rev(sha256(script_bytes)); }
 
-    void scrypt(byte_span_t password, byte_span_t salt, uint32_t cost, uint32_t block_size, uint32_t parallelism,
-        std::vector<unsigned char>& out)
+    std::vector<unsigned char> scrypt(
+        byte_span_t password, byte_span_t salt, uint32_t cost, uint32_t block_size, uint32_t parallelism)
     {
-        GDK_RUNTIME_ASSERT(!out.empty());
+        std::vector<unsigned char> ret(64);
         GDK_VERIFY(wally_scrypt(password.data(), password.size(), salt.data(), salt.size(), cost, block_size,
-            parallelism, &out[0], out.size()));
+            parallelism, &ret[0], ret.size()));
+        return ret;
     }
 
     std::string bip39_mnemonic_from_bytes(byte_span_t data)
     {
         char* s;
-        GDK_VERIFY(::bip39_mnemonic_from_bytes(nullptr, data.data(), data.size(), &s));
+        VERIFY_MNEMONIC(::bip39_mnemonic_from_bytes(nullptr, data.data(), data.size(), &s));
         if (::bip39_mnemonic_validate(nullptr, s) != GA_OK) {
             wally_free_string(s);
             // This should only be possible with bad hardware/cosmic rays
@@ -335,13 +382,13 @@ namespace sdk {
         GDK_VERIFY(::bip39_mnemonic_validate(nullptr, mnemonic.c_str()));
     }
 
-    std::vector<unsigned char> bip39_mnemonic_to_seed(const std::string& mnemonic, const std::string& password)
+    std::vector<unsigned char> bip39_mnemonic_to_seed(const std::string& mnemonic, const std::string& passphrase)
     {
-        GDK_VERIFY(::bip39_mnemonic_validate(nullptr, mnemonic.c_str()));
+        VERIFY_MNEMONIC(::bip39_mnemonic_validate(nullptr, mnemonic.c_str()));
         size_t written;
         std::vector<unsigned char> ret(BIP39_SEED_LEN_512); // FIXME: secure_array
-        GDK_VERIFY(::bip39_mnemonic_to_seed(
-            mnemonic.c_str(), password.empty() ? nullptr : password.c_str(), &ret[0], ret.size(), &written));
+        VERIFY_MNEMONIC(::bip39_mnemonic_to_seed(
+            mnemonic.c_str(), passphrase.empty() ? nullptr : passphrase.c_str(), &ret[0], ret.size(), &written));
         return ret;
     }
 
@@ -349,9 +396,10 @@ namespace sdk {
     {
         size_t written;
         std::vector<unsigned char> entropy(BIP39_ENTROPY_LEN_288); // FIXME: secure_array
-        GDK_VERIFY(::bip39_mnemonic_to_bytes(nullptr, mnemonic.data(), entropy.data(), entropy.size(), &written));
-        GDK_RUNTIME_ASSERT(
-            written == BIP39_ENTROPY_LEN_128 || written == BIP39_ENTROPY_LEN_256 || written == BIP39_ENTROPY_LEN_288);
+        VERIFY_MNEMONIC(::bip39_mnemonic_to_bytes(nullptr, mnemonic.data(), entropy.data(), entropy.size(), &written));
+        if (written != BIP39_ENTROPY_LEN_128 && written != BIP39_ENTROPY_LEN_256 && written != BIP39_ENTROPY_LEN_288) {
+            throw user_error(res::id_invalid_mnemonic);
+        }
         entropy.resize(written);
         return entropy;
     }
@@ -439,23 +487,12 @@ namespace sdk {
         return ret;
     }
 
-    size_t addr_segwit_get_version(const std::string& addr, const std::string& family)
+    std::string addr_segwit_from_bytes(byte_span_t bytes, const std::string& family)
     {
         const uint32_t flags = 0;
-        size_t segwit_version;
-        GDK_VERIFY(wally_addr_segwit_get_version(addr.c_str(), family.c_str(), flags, &segwit_version));
-        GDK_RUNTIME_ASSERT(segwit_version <= 16);
-        return segwit_version;
-    }
-
-    std::string public_key_to_p2pkh_addr(unsigned char btc_version, byte_span_t public_key)
-    {
-        std::array<unsigned char, HASH160_LEN + 1> addr;
-        GDK_VERIFY(wally_ec_public_key_verify(public_key.data(), public_key.size()));
-        const auto hash = hash160(public_key);
-        addr[0] = btc_version;
-        std::copy(hash.begin(), hash.end(), addr.begin() + 1);
-        return base58check_from_bytes(addr);
+        char* ret = 0;
+        GDK_VERIFY(wally_addr_segwit_from_bytes(bytes.data(), bytes.size(), family.c_str(), flags, &ret));
+        return make_string(ret);
     }
 
     std::string base58check_from_bytes(byte_span_t data)
@@ -746,11 +783,11 @@ namespace sdk {
     }
 
     std::string confidential_addr_to_addr_segwit(
-        const std::string& address, const std::string& confidential_prefix, const std::string& prefix)
+        const std::string& address, const std::string& confidential_prefix, const std::string& family)
     {
         char* ret;
         GDK_VERIFY(
-            wally_confidential_addr_to_addr_segwit(address.c_str(), confidential_prefix.c_str(), prefix.c_str(), &ret));
+            wally_confidential_addr_to_addr_segwit(address.c_str(), confidential_prefix.c_str(), family.c_str(), &ret));
         return make_string(ret);
     }
 
@@ -770,11 +807,22 @@ namespace sdk {
         return pub_key;
     }
 
-    std::string confidential_addr_from_addr(const std::string& address, uint32_t prefix, byte_span_t public_key)
+    std::string confidential_addr_from_addr(
+        const std::string& address, uint32_t prefix, const std::string blinding_pubkey_hex)
     {
+        const auto pubkey = h2b(blinding_pubkey_hex);
         char* ret;
-        GDK_VERIFY(
-            wally_confidential_addr_from_addr(address.c_str(), prefix, public_key.data(), public_key.size(), &ret));
+        GDK_VERIFY(wally_confidential_addr_from_addr(address.c_str(), prefix, pubkey.data(), pubkey.size(), &ret));
+        return make_string(ret);
+    }
+
+    std::string confidential_addr_from_addr_segwit(const std::string& address, const std::string& family,
+        const std::string& confidential_prefix, const std::string blinding_pubkey_hex)
+    {
+        const auto pubkey = h2b(blinding_pubkey_hex);
+        char* ret;
+        GDK_VERIFY(wally_confidential_addr_from_addr_segwit(
+            address.c_str(), family.c_str(), confidential_prefix.c_str(), pubkey.data(), pubkey.size(), &ret));
         return make_string(ret);
     }
 
@@ -823,6 +871,13 @@ namespace sdk {
         GDK_VERIFY(wally_tx_to_bytes(tx.get(), flags, buff.data(), buff.size(), &written));
         GDK_RUNTIME_ASSERT(written == buff.size());
         return buff;
+    }
+
+    std::string tx_to_hex(const wally_tx_ptr& tx, uint32_t flags)
+    {
+        char* s;
+        GDK_VERIFY(wally_tx_to_hex(tx.get(), flags, &s));
+        return make_string(s);
     }
 
     void tx_add_raw_output(const wally_tx_ptr& tx, uint64_t satoshi, byte_span_t script)
@@ -918,7 +973,8 @@ namespace sdk {
 
     void tx_set_input_script(const wally_tx_ptr& tx, size_t index, byte_span_t script)
     {
-        GDK_VERIFY(wally_tx_set_input_script(tx.get(), index, script.data(), script.size()));
+        const unsigned char* data = script.size() ? script.data() : nullptr;
+        GDK_VERIFY(wally_tx_set_input_script(tx.get(), index, data, script.size()));
     }
 
     void tx_set_input_witness(const wally_tx_ptr& tx, size_t index, const wally_tx_witness_stack_ptr& witness)

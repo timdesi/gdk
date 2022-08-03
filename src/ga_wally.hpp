@@ -49,6 +49,7 @@ namespace sdk {
 
     using ecdsa_sig_t = std::array<unsigned char, EC_SIGNATURE_LEN>;
     using chain_code_t = std::array<unsigned char, 32>;
+    using pbkdf2_hmac256_t = std::array<unsigned char, PBKDF2_HMAC_SHA256_LEN>;
     using pbkdf2_hmac512_t = std::array<unsigned char, PBKDF2_HMAC_SHA512_LEN>;
     using pub_key_t = std::array<unsigned char, EC_PUBLIC_KEY_LEN>;
     using priv_key_t = std::array<unsigned char, EC_PRIVATE_KEY_LEN>;
@@ -91,8 +92,7 @@ namespace sdk {
     pbkdf2_hmac512_t pbkdf2_hmac_sha512(byte_span_t password, byte_span_t salt, uint32_t cost = 2048);
 
     // PBKDF2-HMAC-SHA512, truncated to 256 bits
-    std::array<unsigned char, PBKDF2_HMAC_SHA256_LEN> pbkdf2_hmac_sha512_256(
-        byte_span_t password, byte_span_t salt, uint32_t cost = 2048);
+    pbkdf2_hmac256_t pbkdf2_hmac_sha512_256(byte_span_t password, byte_span_t salt, uint32_t cost = 2048);
 
     //
     // BIP 32
@@ -130,6 +130,8 @@ namespace sdk {
 
     std::vector<unsigned char> scriptsig_p2pkh_from_der(byte_span_t public_key, byte_span_t sig);
 
+    std::vector<unsigned char> scriptsig_p2sh_p2wpkh_from_bytes(byte_span_t public_key);
+
     void scriptpubkey_csv_2of2_then_1_from_bytes(
         byte_span_t keys, uint32_t csv_blocks, bool optimize, std::vector<unsigned char>& out);
 
@@ -138,13 +140,20 @@ namespace sdk {
 
     uint32_t get_csv_blocks_from_csv_redeem_script(byte_span_t redeem_script);
 
+    ecdsa_sig_t get_sig_from_p2pkh_script_sig(byte_span_t script_sig);
+
     std::vector<ecdsa_sig_t> get_sigs_from_multisig_script_sig(byte_span_t script_sig);
 
     void scriptpubkey_multisig_from_bytes(byte_span_t keys, uint32_t threshold, std::vector<unsigned char>& out);
 
+    std::vector<unsigned char> script_push_from_bytes(byte_span_t data);
+
     std::vector<unsigned char> scriptpubkey_p2pkh_from_hash160(byte_span_t hash);
+    std::vector<unsigned char> scriptpubkey_p2pkh_from_public_key(byte_span_t public_key);
 
     std::vector<unsigned char> scriptpubkey_p2sh_from_hash160(byte_span_t hash);
+
+    std::vector<unsigned char> scriptpubkey_p2sh_p2wsh_from_bytes(byte_span_t script);
 
     std::vector<unsigned char> witness_program_from_bytes(byte_span_t script, uint32_t witness_ver, uint32_t flags);
 
@@ -152,15 +161,15 @@ namespace sdk {
 
     std::string electrum_script_hash_hex(byte_span_t script_bytes);
 
-    void scrypt(byte_span_t password, byte_span_t salt, uint32_t cost, uint32_t block_size, uint32_t parallelism,
-        std::vector<unsigned char>& out);
+    std::vector<unsigned char> scrypt(byte_span_t password, byte_span_t salt, uint32_t cost = 16384,
+        uint32_t block_size = 8, uint32_t parallelism = 8);
 
     std::string bip39_mnemonic_from_bytes(byte_span_t data);
 
     void bip39_mnemonic_validate(const std::string& mnemonic);
 
     std::vector<unsigned char> bip39_mnemonic_to_seed(
-        const std::string& mnemonic, const std::string& password = std::string());
+        const std::string& mnemonic, const std::string& passphrase = std::string());
 
     std::vector<unsigned char> bip39_mnemonic_to_bytes(const std::string& mnemonic);
 
@@ -215,9 +224,7 @@ namespace sdk {
 
     std::vector<unsigned char> addr_segwit_to_bytes(const std::string& addr, const std::string& family);
 
-    size_t addr_segwit_get_version(const std::string& addr, const std::string& family);
-
-    std::string public_key_to_p2pkh_addr(unsigned char btc_version, byte_span_t public_key);
+    std::string addr_segwit_from_bytes(byte_span_t bytes, const std::string& family);
 
     std::string base58check_from_bytes(byte_span_t data);
 
@@ -293,13 +300,16 @@ namespace sdk {
 
     std::string confidential_addr_to_addr(const std::string& address, uint32_t prefix);
     std::string confidential_addr_to_addr_segwit(
-        const std::string& address, const std::string& confidential_prefix, const std::string& prefix);
+        const std::string& address, const std::string& confidential_prefix, const std::string& family);
 
     pub_key_t confidential_addr_to_ec_public_key(const std::string& address, uint32_t prefix);
     pub_key_t confidential_addr_segwit_to_ec_public_key(
         const std::string& address, const std::string& confidential_prefix);
 
-    std::string confidential_addr_from_addr(const std::string& address, uint32_t prefix, byte_span_t public_key);
+    std::string confidential_addr_from_addr(
+        const std::string& address, uint32_t prefix, const std::string blinding_pubkey_hex);
+    std::string confidential_addr_from_addr_segwit(const std::string& address, const std::string& family,
+        const std::string& confidential_prefix, const std::string blinding_pubkey_hex);
 
     blinding_key_t asset_blinding_key_from_seed(byte_span_t seed);
 
@@ -315,6 +325,7 @@ namespace sdk {
     GA_USE_RESULT size_t tx_get_length(const wally_tx_ptr& tx, uint32_t flags = WALLY_TX_FLAG_USE_WITNESS);
 
     std::vector<unsigned char> tx_to_bytes(const wally_tx_ptr& tx, uint32_t flags = WALLY_TX_FLAG_USE_WITNESS);
+    std::string tx_to_hex(const wally_tx_ptr& tx, uint32_t flags = WALLY_TX_FLAG_USE_WITNESS);
 
     void tx_add_raw_output(const wally_tx_ptr& tx, uint64_t satoshi, byte_span_t script);
 

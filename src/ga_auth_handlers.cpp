@@ -24,20 +24,9 @@ namespace sdk {
         // that the code path to upload on login is always executed/doesn't bitrot.
         static const uint32_t INITIAL_UPLOAD_CA = 20;
 
-        static std::string get_confidential_address(
-            const std::string& address, uint32_t prefix, const std::string& blinding_pubkey_hex)
-        {
-            return confidential_addr_from_addr(address, prefix, h2b(blinding_pubkey_hex));
-        }
-
-        static void blind_address(nlohmann::json& addr, uint32_t prefix, const std::string& blinding_pubkey_hex)
-        {
-            auto& address = addr.at("address");
-            addr["unblinded_address"] = address;
-            address = get_confidential_address(address, prefix, blinding_pubkey_hex);
-            addr["blinding_key"] = blinding_pubkey_hex;
-            addr["is_blinded"] = true;
-        }
+        // UTXO user_status values from the Green server
+        static constexpr uint32_t USER_STATUS_DEFAULT = 0;
+        static constexpr uint32_t USER_STATUS_FROZEN = 1;
 
         static const auto& get_sized_array(const nlohmann::json& json, const char* key, size_t size)
         {
@@ -58,11 +47,18 @@ namespace sdk {
             data["ae_host_commitment"] = b2h(host_commitment);
         }
 
+        // Remove keys added by add_ae_host_data()
+        static void remove_ae_host_data(nlohmann::json& data)
+        {
+            data.erase("ae_host_entropy");
+            data.erase("ae_host_commitment");
+        }
+
         // If the hww is populated and supports the AE signing protocol, add
         // the host-entropy and host-commitment fields to the passed json.
         static bool add_required_ae_data(const std::shared_ptr<signer>& signer, nlohmann::json& data)
         {
-            const bool using_ae_protocol = signer->get_ae_protocol_support() != ae_protocol_support_level::none;
+            const bool using_ae_protocol = signer->use_ae_protocol();
             data["use_ae_protocol"] = using_ae_protocol;
             if (using_ae_protocol) {
                 add_ae_host_data(data);
@@ -92,9 +88,10 @@ namespace sdk {
                 hw_reply.at("signer_commitment"), hw_reply.at("signature"), has_sighash);
         }
 
-        static void set_blinding_nonce_request_data(
+        static void set_blinding_nonce_request_data(const std::shared_ptr<signer>& signer,
             const unique_pubkeys_and_scripts_t& missing, nlohmann::json& twofactor_data)
         {
+            twofactor_data["blinding_keys_required"] = !signer->has_master_blinding_key();
             auto& scripts = twofactor_data["scripts"];
             auto& public_keys = twofactor_data["public_keys"];
             for (const auto& m : missing) {
@@ -103,33 +100,137 @@ namespace sdk {
             }
         }
 
-        static void encache_blinding_nonces(
+        static void encache_blinding_data(
             session_impl& session, nlohmann::json& twofactor_data, const nlohmann::json& hw_reply)
         {
             const auto& scripts = twofactor_data.at("scripts");
             const auto& public_keys = twofactor_data.at("public_keys");
             const auto& nonces = get_sized_array(hw_reply, "nonces", scripts.size());
+            const auto blinding_pubkeys_p = hw_reply.find("public_keys");
+            const bool have_blinding_pubkeys = blinding_pubkeys_p != hw_reply.end();
+            if (have_blinding_pubkeys) {
+                get_sized_array(hw_reply, "public_keys", scripts.size()); // Must be a sized array if given
+            }
+            std::string blinding_pubkey_hex;
 
-            // Encache the blinding nonces we got back
+            // Encache the blinding nonces and any blinding pubkeys
             bool updated = false;
             for (size_t i = 0; i < scripts.size(); ++i) {
-                if (!nonces.at(i).empty()) {
-                    updated |= session.set_blinding_nonce(public_keys.at(i), scripts.at(i), nonces.at(i));
+                const std::string nonce = nonces.at(i);
+                if (!nonce.empty()) {
+                    if (have_blinding_pubkeys) {
+                        blinding_pubkey_hex = blinding_pubkeys_p->at(i);
+                    }
+                    updated
+                        |= session.encache_blinding_data(public_keys.at(i), scripts.at(i), nonce, blinding_pubkey_hex);
                 }
             }
             if (updated) {
                 session.save_cache();
             }
         }
+
+        class upload_ca_handler : public auth_handler_impl {
+        public:
+            upload_ca_handler(session& session, uint32_t subaccount, size_t num_addrs);
+            void add_request(uint32_t subaccount, size_t num_addrs);
+
+        private:
+            state_type call_impl() override;
+
+            std::vector<std::pair<uint32_t, size_t>> m_required_addrs;
+            size_t m_num_required_addrs;
+            size_t m_num_generated_addrs;
+            bool m_is_blinded;
+            std::map<uint32_t, std::vector<nlohmann::json>> m_addresses;
+        };
+
+        upload_ca_handler::upload_ca_handler(session& session, uint32_t subaccount, size_t num_addrs)
+            : auth_handler_impl(session, "upload_confidential_addrs")
+            , m_num_required_addrs(0)
+            , m_num_generated_addrs(0)
+            , m_is_blinded(false)
+        {
+            add_request(subaccount, num_addrs);
+        }
+
+        void upload_ca_handler::add_request(uint32_t subaccount, size_t num_addrs)
+        {
+            GDK_RUNTIME_ASSERT(num_addrs);
+            m_required_addrs.emplace_back(std::make_pair(subaccount, num_addrs));
+            m_num_required_addrs += num_addrs;
+        }
+
+        auth_handler::state_type upload_ca_handler::call_impl()
+        {
+            if (m_num_generated_addrs < m_num_required_addrs) {
+                // Generate addresses to blind and upload, in a restartable fashion
+                // TODO: Server support for returning multiple addresses for AMP subaccounts
+                for (const auto& req : m_required_addrs) {
+                    auto& generated = m_addresses[req.first];
+                    generated.reserve(req.second);
+                    while (generated.size() < req.second) {
+                        generated.emplace_back(m_session->get_receive_address({ { "subaccount", req.first } }));
+                        ++m_num_generated_addrs;
+                    }
+                }
+            }
+
+            if (m_hw_request == hw_request::none) {
+                // We haven't asked the signer to blind the addresses; do so now
+                nlohmann::json::array_t scripts;
+                scripts.reserve(m_num_required_addrs);
+                for (const auto& subaccount_addresses : m_addresses) {
+                    for (const auto& addr : subaccount_addresses.second) {
+                        scripts.push_back(addr.at("blinding_script"));
+                    }
+                }
+                signal_hw_request(hw_request::get_blinding_public_keys);
+                m_twofactor_data["scripts"] = std::move(scripts);
+                return m_state;
+            }
+
+            // The signer has provided the blinding keys for our address.
+            GDK_RUNTIME_ASSERT(m_hw_request == hw_request::get_blinding_public_keys);
+
+            if (!m_is_blinded) {
+                // Blind our addresses with the signer provided blinding keys
+                const std::vector<std::string> public_keys = get_hw_reply().at("public_keys");
+                GDK_RUNTIME_ASSERT(public_keys.size() == m_num_required_addrs);
+
+                size_t i = 0;
+                for (auto& subaccount_addresses : m_addresses) {
+                    for (auto& addr : subaccount_addresses.second) {
+                        blind_address(m_net_params, addr, public_keys.at(i));
+                        ++i;
+                    }
+                }
+                m_is_blinded = true;
+            }
+
+            while (!m_addresses.empty()) {
+                auto subaccount_addresses = m_addresses.begin();
+                std::vector<std::string> addresses;
+                addresses.reserve(subaccount_addresses->second.size());
+                for (const auto& addr : subaccount_addresses->second) {
+                    addresses.push_back(addr.at("address"));
+                }
+                const auto subaccount = subaccount_addresses->first;
+                m_session->upload_confidential_addresses(subaccount, addresses);
+                m_addresses.erase(subaccount_addresses);
+            }
+            return state_type::done;
+        }
     } // namespace
 
     //
     // Register
     //
-    register_call::register_call(session& session, const nlohmann::json& hw_device, const std::string& mnemonic)
+    register_call::register_call(
+        session& session, const nlohmann::json& hw_device, const nlohmann::json& credential_data)
         : auth_handler_impl(session, "register_user", std::shared_ptr<signer>())
         , m_hw_device(hw_device)
-        , m_credential_data(mnemonic.empty() ? nlohmann::json() : nlohmann::json({ { "mnemonic", mnemonic } }))
+        , m_credential_data(credential_data)
     {
     }
 
@@ -185,10 +286,12 @@ namespace sdk {
 
     auth_handler::state_type login_user_call::call_impl()
     {
+        const bool is_electrum = m_net_params.is_electrum();
+
         if (!m_signer) {
             if (m_credential_data.contains("pin")) {
                 // Login with PIN. Fetch the mnemonic from the pin and pin data
-                m_credential_data = { { "mnemonic", m_session->mnemonic_from_pin_data(m_credential_data) } };
+                m_credential_data = m_session->credentials_from_pin_data(m_credential_data);
             }
 
             // Create our signer
@@ -214,21 +317,22 @@ namespace sdk {
             }
 
             if (new_signer->is_watch_only()) {
-                m_result = m_session->login_watch_only(new_signer);
+                m_result = m_session->login_wo(new_signer);
                 m_signer = new_signer;
                 return state_type::done;
             }
 
-            if (m_net_params.is_electrum()) {
-                // FIXME: Implement rust login via authenticate()
-                m_result = m_session->login(new_signer);
-                m_signer = new_signer;
-                return state_type::done;
+            m_signer = new_signer;
+            if (is_electrum) {
+                if (m_net_params.is_liquid()) {
+                    // FIXME: Implement rust liquid login via authenticate()
+                    m_result = m_session->login(new_signer);
+                    return state_type::done;
+                }
             }
 
             // We need master pubkey for the challenge, client secret pubkey for login
             try {
-                m_signer = new_signer;
                 signal_hw_request(hw_request::get_xpubs);
                 auto& paths = m_twofactor_data["paths"];
                 paths.emplace_back(signer::EMPTY_PATH);
@@ -240,59 +344,67 @@ namespace sdk {
             return m_state;
         }
 
-        if (m_hw_request == hw_request::get_xpubs && m_challenge.empty()) {
-            // We have a result from our first get_xpubs request for the challenge.
-            // Compute the challenge with the master pubkey
+        if (m_hw_request == hw_request::get_xpubs && m_master_bip32_xpub.empty()) {
+            GDK_RUNTIME_ASSERT(m_challenge.empty());
+
+            // We have a result from our first get_xpubs request.
             const std::vector<std::string> xpubs = get_hw_reply().at("xpubs");
 
             m_master_bip32_xpub = xpubs.at(0);
-            const auto public_key = make_xpub(m_master_bip32_xpub).second;
-            m_challenge = m_session->get_challenge(public_key);
+            if (!is_electrum) {
+                // Compute the login challenge with the master pubkey
+                const auto public_key = make_xpub(m_master_bip32_xpub).second;
+                m_challenge = m_session->get_challenge(public_key);
+            }
 
+            // Set the cache keys for the wallet, loading/creating the
+            // local cache as needed.
             const auto local_xpub = make_xpub(xpubs.at(1));
             m_session->set_local_encryption_keys(local_xpub.second, m_signer);
+
+            if (is_electrum) {
+                // Skip the challenge/response steps since we have no server
+                // to authenticate to.
+                goto do_authenticate;
+            }
 
             // Ask the caller to sign the challenge
             signal_hw_request(hw_request::sign_message);
             m_twofactor_data["message"] = CHALLENGE_PREFIX + m_challenge;
             m_twofactor_data["path"] = signer::LOGIN_PATH;
-            m_use_anti_exfil = add_required_ae_data(m_signer, m_twofactor_data);
+            add_required_ae_data(m_signer, m_twofactor_data);
             return m_state;
         } else if (m_hw_request == hw_request::sign_message) {
             // Caller has signed the challenge
-            const auto& hw_reply = get_hw_reply();
-            if (m_use_anti_exfil) {
-                // Anti-Exfil protocol: verify the signature
-                const auto login_bip32_xpub = m_signer->get_bip32_xpub(make_vector(signer::LOGIN_PATH));
-                verify_ae_message(m_twofactor_data, login_bip32_xpub, signer::EMPTY_PATH, hw_reply);
-            }
+        do_authenticate:
+            std::string sig_der_hex;
 
+            if (!is_electrum) {
+                const auto& hw_reply = get_hw_reply();
+                if (m_signer->use_ae_protocol()) {
+                    // Anti-Exfil protocol: verify the signature
+                    const auto login_bip32_xpub = m_signer->get_bip32_xpub(make_vector(signer::LOGIN_PATH));
+                    verify_ae_message(m_twofactor_data, login_bip32_xpub, signer::EMPTY_PATH, hw_reply);
+                }
+                sig_der_hex = hw_reply.at("signature");
+            }
             // Log in and set up the session
-            m_result = m_session->authenticate(hw_reply.at("signature"), "GA", m_master_bip32_xpub, m_signer);
+            m_result = m_session->authenticate(sig_der_hex, "GA", m_master_bip32_xpub, m_signer);
 
-            // Ask the caller for the xpubs for each subaccount
-            std::vector<nlohmann::json> paths;
-            for (const auto& sa : m_session->get_subaccounts()) {
-                paths.emplace_back(m_session->get_subaccount_root_path(sa["pointer"]));
+            if (m_signer->is_liquid()) {
+                if (m_signer->supports_host_unblinding()) {
+                    // Ask the HW device to provide the master blinding key.
+                    // If we are a software wallet, we already have it, but we
+                    // use the HW interface to ensure we exercise the same
+                    // fetching and caching logic.
+                    signal_hw_request(hw_request::get_master_blinding_key);
+                    return m_state;
+                } else {
+                    GDK_RUNTIME_ASSERT_MSG(!is_electrum, "HWW must support host unblinding for singlesig wallets");
+                }
             }
-            signal_hw_request(hw_request::get_xpubs);
-            m_twofactor_data["paths"] = paths;
-            return m_state;
-        } else if (m_hw_request == hw_request::get_xpubs) {
-            // Caller has provided the xpubs for each subaccount
-            m_session->register_subaccount_xpubs(get_hw_reply().at("xpubs"));
 
-            if (m_signer->is_liquid() && m_signer->supports_host_unblinding()) {
-                // Ask the HW device to provide the master blinding key.
-                // If we are a software wallet, we already have it, but we
-                // use the HW interface to ensure we exercise the same
-                // fetching and caching logic.
-                signal_hw_request(hw_request::get_master_blinding_key);
-                return m_state;
-            }
-            //
-            // Completed Login. FALL THROUGH to check for confidential address upload below
-            //
+            return request_subaccount_xpubs();
         } else if (m_hw_request == hw_request::get_master_blinding_key) {
             // We either had the master blinding key cached, have fetched it
             // from the HWW, or the user has denied the request (if its blank).
@@ -300,46 +412,55 @@ namespace sdk {
             // our signer if present to allow host unblinding.
             const std::string key_hex = get_hw_reply().at("master_blinding_key");
             m_session->set_cached_master_blinding_key(key_hex);
+
+            return request_subaccount_xpubs();
+        } else if (m_hw_request == hw_request::get_xpubs) {
+            // Caller has provided the xpubs for each subaccount
+            const std::vector<std::string> xpubs = get_hw_reply().at("xpubs");
+            m_session->register_subaccount_xpubs(m_subaccount_pointers, xpubs);
+
             //
-            // Completed Login. FALL THROUGH to check for confidential address upload below
+            // Completed Login. FALL THROUGH for post-login processing
             //
-        } else if (m_hw_request == hw_request::get_blinding_public_keys) {
-            // AMP: Caller has provided the blinding keys for confidential address uploading.
-            // Blind them and upload the blinded addresses to the server
-            const auto prefix = m_net_params.blinded_prefix();
-            const std::vector<std::string> public_keys = get_hw_reply().at("public_keys");
-            std::map<uint32_t, std::vector<std::string>> addresses_by_subaccount;
-            size_t i = 0;
-            for (const auto& it : m_addresses) {
-                auto address = get_confidential_address(it.at("address"), prefix, public_keys.at(i));
-                addresses_by_subaccount[it.at("subaccount")].emplace_back(address);
-                ++i;
-            }
-            for (auto& it : addresses_by_subaccount) {
-                m_session->upload_confidential_addresses(it.first, it.second);
-            }
+        }
+
+        // We are logged in
+        if (is_electrum) {
+            m_session->start_sync_threads();
             return state_type::done;
         }
 
-        // We are logged in,
         // Check whether we need to upload confidential addresses.
-        nlohmann::json::array_t scripts;
+        std::unique_ptr<upload_ca_handler> handler_p;
         for (const auto& sa : m_session->get_subaccounts()) {
-            const uint32_t required_ca = sa.value("required_ca", 0);
-            scripts.reserve(scripts.size() + required_ca);
-            for (size_t i = 0; i < required_ca; ++i) {
-                m_addresses.push_back(m_session->get_receive_address({ { "subaccount", sa["pointer"] } }));
-                scripts.push_back(m_addresses.back().at("blinding_script"));
+            const size_t required_ca = sa.value("required_ca", 0);
+            if (required_ca) {
+                const uint32_t subaccount = sa["pointer"];
+                if (!handler_p) {
+                    handler_p.reset(new upload_ca_handler(m_session_parent, subaccount, required_ca));
+                } else {
+                    handler_p->add_request(subaccount, required_ca);
+                }
             }
         }
-        if (scripts.empty()) {
-            // No addresses to upload, so we are done
-            return state_type::done;
+        if (handler_p) {
+            add_next_handler(handler_p.release());
         }
+        return state_type::done;
+    }
 
-        // Ask the caller to provide the blinding keys
-        signal_hw_request(hw_request::get_blinding_public_keys);
-        m_twofactor_data["scripts"] = std::move(scripts);
+    auth_handler::state_type login_user_call::request_subaccount_xpubs()
+    {
+        // Ask the caller for the xpubs for each subaccount
+        m_subaccount_pointers = m_session->get_subaccount_pointers();
+
+        std::vector<nlohmann::json> paths;
+        paths.reserve(m_subaccount_pointers.size());
+        for (const auto& pointer : m_subaccount_pointers) {
+            paths.emplace_back(m_session->get_subaccount_root_path(pointer));
+        }
+        signal_hw_request(hw_request::get_xpubs);
+        m_twofactor_data["paths"] = paths;
         return m_state;
     }
 
@@ -356,6 +477,8 @@ namespace sdk {
 
     void create_subaccount_call::initialize()
     {
+        m_session->ensure_full_session();
+
         const std::string type = m_details.at("type");
         m_subaccount = m_session->get_next_subaccount(type);
 
@@ -397,35 +520,22 @@ namespace sdk {
                 signal_hw_request(hw_request::sign_message);
                 m_twofactor_data["message"] = format_recovery_key_message(m_details["recovery_xpub"], m_subaccount);
                 m_twofactor_data["path"] = signer::LOGIN_PATH;
-                m_use_anti_exfil = add_required_ae_data(m_signer, m_twofactor_data);
+                add_required_ae_data(get_signer(), m_twofactor_data);
                 return m_state;
             }
             // Fall through to create the subaccount
         } else if (m_hw_request == hw_request::sign_message) {
             // 2of3 subaccount: Caller has signed the recovery key
+            auto signer = get_signer();
             const auto& hw_reply = get_hw_reply();
-            if (m_use_anti_exfil) {
+            if (signer->use_ae_protocol()) {
                 // Anti-Exfil protocol: verify the signature
-                auto login_bip32_xpub = m_signer->get_bip32_xpub(make_vector(signer::LOGIN_PATH));
+                auto login_bip32_xpub = signer->get_bip32_xpub(make_vector(signer::LOGIN_PATH));
                 verify_ae_message(m_twofactor_data, login_bip32_xpub, signer::EMPTY_PATH, hw_reply);
             }
 
             m_details["recovery_key_sig"] = b2h(ec_sig_from_der(h2b(hw_reply.at("signature")), false));
             // Fall through to create the subaccount
-        } else if (m_hw_request == hw_request::get_blinding_public_keys) {
-            // AMP: Caller has provided the blinding keys for confidential address uploading: blind them
-            const auto prefix = m_net_params.blinded_prefix();
-            const std::vector<std::string> public_keys = get_hw_reply().at("public_keys");
-            std::vector<std::string> addresses;
-            size_t i = 0;
-            for (const auto& it : m_addresses) {
-                auto address = get_confidential_address(it.at("address"), prefix, public_keys.at(i));
-                addresses.emplace_back(std::move(address));
-                ++i;
-            }
-            // Upload the blinded addresses to the server
-            m_session->upload_confidential_addresses(m_subaccount, addresses);
-            return state_type::done;
         }
 
         // Create the subaccount
@@ -434,17 +544,8 @@ namespace sdk {
         GDK_RUNTIME_ASSERT(m_subaccount == m_result.at("pointer"));
 
         if (m_details.at("type") == "2of2_no_recovery") {
-            // AMP: We need to upload confidential addresses, get the keys for blinding
-            // TODO: Server support for returning multiple addresses for AMP subaccounts
-            nlohmann::json::array_t scripts;
-            scripts.reserve(INITIAL_UPLOAD_CA);
-            for (size_t i = 0; i < INITIAL_UPLOAD_CA; ++i) {
-                m_addresses.push_back(m_session->get_receive_address({ { "subaccount", m_subaccount } }));
-                scripts.push_back(m_addresses.back().at("blinding_script"));
-            }
-            signal_hw_request(hw_request::get_blinding_public_keys);
-            m_twofactor_data["scripts"] = std::move(scripts);
-            return m_state;
+            // Push a handler to upload confidential addresses
+            add_next_handler(new upload_ca_handler(m_session_parent, m_subaccount, INITIAL_UPLOAD_CA));
         }
         return state_type::done;
     }
@@ -458,13 +559,14 @@ namespace sdk {
 
     void ack_system_message_call::initialize()
     {
+        m_session->ensure_full_session();
+
         m_message_info = m_session->get_system_message_info(m_msg);
-        m_use_anti_exfil = m_signer->get_ae_protocol_support() != ae_protocol_support_level::none;
 
         signal_hw_request(hw_request::sign_message);
         m_twofactor_data["message"] = m_message_info.first;
         m_twofactor_data["path"] = m_message_info.second;
-        add_required_ae_data(m_signer, m_twofactor_data);
+        add_required_ae_data(get_signer(), m_twofactor_data);
     }
 
     auth_handler::state_type ack_system_message_call::call_impl()
@@ -476,8 +578,9 @@ namespace sdk {
         }
 
         const auto& hw_reply = get_hw_reply();
-        if (m_use_anti_exfil) {
-            const auto master_bip32_xpub = m_signer->get_bip32_xpub(make_vector(signer::EMPTY_PATH));
+        auto signer = get_signer();
+        if (signer->use_ae_protocol()) {
+            const auto master_bip32_xpub = signer->get_bip32_xpub(make_vector(signer::EMPTY_PATH));
             verify_ae_message(m_twofactor_data, master_bip32_xpub, m_message_info.second, hw_reply);
         }
         m_session->ack_system_message(m_message_info.first, hw_reply.at("signature"));
@@ -496,77 +599,109 @@ namespace sdk {
 
     void sign_transaction_call::initialize()
     {
-        if (json_get_value(m_tx_details, "is_sweep", false) || m_net_params.is_electrum()) {
-            // TODO: Once tx aggregation is implemented, merge the sweep logic
-            // with general tx construction to allow HW devices to sign individual
-            // inputs (currently HW expects to sign all tx inputs)
-            // FIXME: Sign rust txs using the standard code path
-            m_result = m_session->sign_transaction(m_tx_details);
-            m_state = state_type::done;
-        } else {
+        if (!m_twofactor_data.contains("signing_inputs")) {
             // Compute the data we need for the hardware to sign the transaction
-            // We use the Anti-Exfil protocol if the hw supports it
-            m_use_anti_exfil = get_signer()->get_ae_protocol_support() != ae_protocol_support_level::none;
             signal_hw_request(hw_request::sign_tx);
             m_twofactor_data["transaction"] = m_tx_details;
-            m_twofactor_data["use_ae_protocol"] = m_use_anti_exfil;
 
             // We need the inputs, augmented with types, scripts and paths
             auto signing_inputs = get_ga_signing_inputs(m_tx_details);
-            std::set<std::string> addr_types;
             for (auto& input : signing_inputs) {
                 const auto& addr_type = input.at("address_type");
+                // FIXME: Allow including inputs that are not spendable by us,
+                // and that include sweep outouts
                 GDK_RUNTIME_ASSERT(!addr_type.empty()); // Must be spendable by us
-                addr_types.insert(addr_type.get<std::string>());
-
-                // Add host-entropy and host-commitment to each input if using the anti-exfil protocol
-                if (m_use_anti_exfil) {
-                    add_ae_host_data(input);
-                }
-            }
-            if (addr_types.find(address_type::p2pkh) != addr_types.end()) {
                 // TODO: Support mixed/batched sweep transactions with non-sweep inputs
-                GDK_RUNTIME_ASSERT(false);
+                GDK_RUNTIME_ASSERT(!input.contains("private_key"));
             }
 
+            // FIXME: Do not duplicate the transaction_outputs in required_data
+            m_twofactor_data["transaction_outputs"] = m_tx_details["transaction_outputs"];
+            m_twofactor_data["signing_inputs"] = std::move(signing_inputs);
+        }
+    }
+
+    void sign_transaction_call::set_signer_data(const std::shared_ptr<signer>& signer)
+    {
+        // We use the Anti-Exfil protocol if the hw supports it
+        const bool use_ae_protocol = signer->use_ae_protocol();
+        m_twofactor_data["use_ae_protocol"] = use_ae_protocol;
+
+        for (auto& input : m_twofactor_data["signing_inputs"]) {
+            const auto& addr_type = input.at("address_type");
+            GDK_RUNTIME_ASSERT(!addr_type.empty()); // Must be spendable by us
+            // TODO: Support mixed/batched sweep transactions with non-sweep inputs
+            GDK_RUNTIME_ASSERT(!input.contains("private_key"));
+
+            // Add host-entropy and host-commitment to each input if using the anti-exfil protocol
+            if (use_ae_protocol) {
+                add_ae_host_data(input);
+            } else {
+                remove_ae_host_data(input);
+            }
+        }
+
+        if (!signer->is_remote() && !m_twofactor_data.contains("signing_transactions")) {
             nlohmann::json prev_txs;
             if (!m_net_params.is_liquid()) {
                 // BTC: Provide the previous txs data for validation, even
                 // for segwit, in order to mitigate the segwit fee attack.
                 // (Liquid txs are segwit+explicit fee and so not affected)
-                for (const auto& input : signing_inputs) {
+                for (const auto& input : m_twofactor_data["signing_inputs"]) {
                     const std::string txhash = input.at("txhash");
                     if (!prev_txs.contains(txhash)) {
                         auto prev_tx = m_session->get_raw_transaction_details(txhash);
-                        prev_txs.emplace(txhash, b2h(tx_to_bytes(prev_tx)));
+                        prev_txs.emplace(txhash, tx_to_hex(prev_tx));
                     }
                 }
             }
-            m_twofactor_data["signing_address_types"] = std::vector<std::string>(addr_types.begin(), addr_types.end());
-            m_twofactor_data["signing_inputs"] = signing_inputs;
             m_twofactor_data["signing_transactions"] = std::move(prev_txs);
-            // FIXME: Do not duplicate the transaction_outputs in required_data
-            m_twofactor_data["transaction_outputs"] = m_tx_details["transaction_outputs"];
         }
     }
 
     auth_handler::state_type sign_transaction_call::call_impl()
     {
+        if (json_get_value(m_tx_details, "is_sweep", false)
+            || (m_net_params.is_electrum() && m_net_params.is_liquid())) {
+            // For sweep txs and liquid electrum single sig, sign the tx in software.
+            // TODO: Once tx aggregation is implemented, merge the sweep logic
+            // with general tx construction to allow HW devices to sign individual
+            // inputs (currently HW expects to sign all tx inputs)
+            // FIXME: Sign rust liquid txs using the standard code path
+            m_result = m_session->user_sign_transaction(m_tx_details);
+            return state_type::done;
+        }
+
+        auto signer = get_signer();
+
         if (!m_initialized) {
+            // Create signing/twofactor data for user signing
             initialize();
+            // Create the data needed for user signing
+            set_signer_data(signer);
             m_initialized = true;
             return m_state;
         }
 
+        if (!json_get_value(m_result, "user_signed", false)) {
+            // We haven't signed the users inputs yet, do so now
+            sign_user_inputs(signer);
+        }
+        return state_type::done;
+    }
+
+    void sign_transaction_call::sign_user_inputs(const std::shared_ptr<signer>& signer)
+    {
         const auto& hw_reply = get_hw_reply();
         const auto& inputs = m_twofactor_data["signing_inputs"];
         const auto& signatures = get_sized_array(hw_reply, "signatures", inputs.size());
         const auto& outputs = m_twofactor_data["transaction_outputs"];
         const auto& transaction_details = m_twofactor_data["transaction"];
         const bool is_liquid = m_net_params.is_liquid();
+        const bool is_electrum = m_net_params.is_electrum();
         const auto tx = tx_from_hex(transaction_details.at("transaction"), tx_flags(is_liquid));
 
-        if (is_liquid && get_signer()->is_hardware()) {
+        if (is_liquid && signer->is_hardware()) {
             // FIMXE: We skip re-blinding for the internal software signer here,
             // since we have already done it. It should be possible to avoid blinding
             // the tx twice in the general HWW case.
@@ -588,7 +723,7 @@ namespace sdk {
         // If we are using the Anti-Exfil protocol we verify the signatures
         // TODO: the signer-commitments should be verified as being the same for the
         // same input data and host-entropy (eg. if retrying following failure).
-        if (m_use_anti_exfil) {
+        if (signer->use_ae_protocol()) {
             // FIXME: User pubkeys is not threadsafe if adding a subaccount
             // at the same time (this cant happen yet but should be allowed
             // in the future).
@@ -596,7 +731,15 @@ namespace sdk {
             size_t i = 0;
             const auto& signer_commitments = get_sized_array(hw_reply, "signer_commitments", inputs.size());
             for (const auto& utxo : inputs) {
-                const auto pubkey = user_pubkeys.derive(utxo.at("subaccount"), utxo.at("pointer"));
+                const uint32_t subaccount = utxo.at("subaccount");
+                const uint32_t pointer = utxo.at("pointer");
+
+                pub_key_t pubkey;
+                if (!is_electrum) {
+                    pubkey = user_pubkeys.derive(subaccount, pointer);
+                } else {
+                    pubkey = user_pubkeys.derive(subaccount, pointer, utxo.value("is_internal", false));
+                }
                 const auto script_hash = get_script_hash(m_net_params, utxo, tx, i);
                 constexpr bool has_sighash = true;
                 verify_ae_signature(
@@ -605,7 +748,7 @@ namespace sdk {
             }
         }
 
-        const bool is_low_r = get_signer()->supports_low_r();
+        const bool is_low_r = signer->supports_low_r();
         size_t i = 0;
         for (const auto& utxo : inputs) {
             add_input_signature(tx, i, utxo, signatures[i], is_low_r);
@@ -616,6 +759,67 @@ namespace sdk {
         m_result["user_signed"] = true;
         m_result["blinded"] = true;
         update_tx_size_info(m_net_params, tx, m_result);
+    }
+
+    //
+    // Sign PSBT
+    //
+    psbt_sign_call::psbt_sign_call(session& session, const nlohmann::json& details)
+        : auth_handler_impl(session, "psbt_sign")
+        , m_details(details)
+        , m_initialized(false)
+    {
+    }
+
+    void psbt_sign_call::initialize()
+    {
+        if (m_net_params.is_electrum() || !m_net_params.is_liquid() || !get_signer()->is_hardware()) {
+            m_result = m_session->psbt_sign(m_details);
+            m_state = state_type::done;
+        } else {
+            // TODO: hww interactions (anti exfil, set signing data, etc)
+            GDK_RUNTIME_ASSERT_MSG(false, "PSBT signing not implemented.");
+        }
+    }
+
+    auth_handler::state_type psbt_sign_call::call_impl()
+    {
+        if (!m_initialized) {
+            initialize();
+            m_initialized = true;
+            return m_state;
+        }
+
+        // TODO: hww interactions (anti exfil, set signing data, etc)
+        GDK_RUNTIME_ASSERT_MSG(false, "PSBT signing not implemented.");
+        return state_type::done;
+    }
+
+    //
+    // PSBT get details
+    //
+    psbt_get_details_call::psbt_get_details_call(session& session, const nlohmann::json& details)
+        : auth_handler_impl(session, "psbt_get_details")
+        , m_details(details)
+    {
+    }
+
+    auth_handler::state_type psbt_get_details_call::call_impl()
+    {
+        GDK_RUNTIME_ASSERT(!m_net_params.is_electrum());
+        GDK_RUNTIME_ASSERT(m_net_params.is_liquid());
+        // TODO: replace the following line with a user error once we have the string res.
+        GDK_RUNTIME_ASSERT(get_signer()->has_master_blinding_key());
+
+        // Currently updating the scriptpubkey cache is quite expensive
+        // and requires multiple network calls, so for the time being
+        // we only update it here.
+        for (const auto& sa : m_session->get_subaccounts()) {
+            const uint32_t subaccount = sa.at("pointer");
+            m_session->encache_new_scriptpubkeys(subaccount);
+        }
+
+        m_result = m_session->psbt_get_details(m_details);
         return state_type::done;
     }
 
@@ -652,8 +856,7 @@ namespace sdk {
         }
 
         // Liquid: blind the address using the blinding key from the caller
-        const auto prefix = m_net_params.blinded_prefix();
-        blind_address(m_result, prefix, get_hw_reply().at("public_keys").at(0));
+        blind_address(m_net_params, m_result, get_hw_reply().at("public_keys").at(0));
         return state_type::done;
     }
 
@@ -669,21 +872,8 @@ namespace sdk {
 
     void get_previous_addresses_call::initialize()
     {
-        const uint32_t subaccount = json_get_value(m_details, "subaccount", 0);
-        const uint32_t last_pointer = json_get_value(m_details, "last_pointer", 0);
-        if (last_pointer == 1) {
-            // Prevent a server call if the user iterates until empty results
-            m_result = { { "subaccount", subaccount }, { "list", nlohmann::json::array() }, { "last_pointer", 1 } };
-            m_state = state_type::done;
-            return; // Nothing further to do
-        }
-        // Fetch the list of previous addresses from the server
-        m_result = m_session->get_previous_addresses(subaccount, last_pointer);
-        if (!m_net_params.is_liquid() || m_result["list"].empty()) {
-            if (m_result["list"].empty()) {
-                // FIXME: The server returns 0 if there are no addresses generated
-                m_result["last_pointer"] = 1;
-            }
+        m_result = m_session->get_previous_addresses(m_details);
+        if (!m_net_params.is_liquid() || m_net_params.is_electrum() || m_result["list"].empty()) {
             m_state = state_type::done;
             return; // Nothing further to do
         }
@@ -704,11 +894,10 @@ namespace sdk {
         }
 
         // Liquid: blind the addresses using the blinding key from the HW
-        const auto prefix = m_net_params.blinded_prefix();
         const std::vector<std::string> public_keys = get_hw_reply().at("public_keys");
         size_t i = 0;
         for (auto& it : m_result.at("list")) {
-            blind_address(it, prefix, public_keys.at(i));
+            blind_address(m_net_params, it, public_keys.at(i));
             ++i;
         }
         return state_type::done;
@@ -732,7 +921,6 @@ namespace sdk {
         }
 
         // Otherwise, we have been called after resolving our blinding keys
-        const auto prefix = m_net_params.blinded_prefix();
         const std::vector<std::string> public_keys = get_hw_reply().at("public_keys");
 
         // Blind any unblinded change addresseses
@@ -740,9 +928,8 @@ namespace sdk {
         for (auto& it : m_result.at("change_address").items()) {
             auto& addr = it.value();
             if (!addr.value("is_blinded", false)) {
-                auto& address = addr.at("address");
-                address = confidential_addr_to_addr(address, prefix); // Remove fake blinding
-                blind_address(addr, prefix, public_keys.at(i));
+                unblind_address(m_net_params, addr); // Remove fake blinding
+                blind_address(m_net_params, addr, public_keys.at(i));
                 ++i;
             }
         }
@@ -822,15 +1009,54 @@ namespace sdk {
     //
     // Get subaccounts
     //
-    get_subaccounts_call::get_subaccounts_call(session& session)
+    get_subaccounts_call::get_subaccounts_call(session& session, const nlohmann::json& details)
         : auth_handler_impl(session, "get_subaccounts")
+        , m_subaccount_type(address_type::p2sh_p2wpkh)
+        , m_subaccount(0)
+        , m_details(details)
     {
     }
 
     auth_handler::state_type get_subaccounts_call::call_impl()
     {
-        m_result = { { "subaccounts", m_session->get_subaccounts() } };
-        return state_type::done;
+        if (!m_net_params.is_electrum() || !m_details.value("refresh", false) || m_subaccount_type.empty()) {
+            m_result = { { "subaccounts", m_session->get_subaccounts() } };
+            return state_type::done;
+        }
+
+        // TODO: consider batching requests for xpubs.
+        // The current implementation asks for one xpub at the time.
+        // Depending on network connection speed and hardware signer response time,
+        // this might affect performance negatively.
+
+        // BIP44 account discovery
+        // Performed only for Electrum sessions and if the client requests it.
+        if (m_hw_request == hw_request::get_xpubs) {
+            // Caller has provided the xpub for the subaccount
+            const std::string xpub = get_hw_reply().at("xpubs").at(0);
+            if (m_session->discover_subaccount(xpub, m_subaccount_type)) {
+                m_session->create_subaccount({ { "name", std::string() }, { "discovered", true } }, m_subaccount, xpub);
+            } else {
+                // Found an empty subaccount for the current subaccount type,
+                // step to the next subaccount type.
+                if (m_subaccount_type == address_type::p2sh_p2wpkh) {
+                    m_subaccount_type = address_type::p2wpkh;
+                } else if (m_subaccount_type == address_type::p2wpkh) {
+                    m_subaccount_type = address_type::p2pkh;
+                } else if (m_subaccount_type == address_type::p2pkh) {
+                    m_subaccount_type.clear();
+                    // No more subaccount types, ready to return
+                    return m_state;
+                }
+            }
+        }
+
+        // Ask for the xpub for the next subaccount of the current type
+        m_subaccount = m_session->get_next_subaccount(m_subaccount_type);
+        signal_hw_request(hw_request::get_xpubs);
+        auto& paths = m_twofactor_data["paths"];
+        paths.emplace_back(m_session->get_subaccount_root_path(m_subaccount));
+        return m_state;
     }
 
     //
@@ -868,7 +1094,7 @@ namespace sdk {
 
         if (m_hw_request == hw_request::get_blinding_nonces) {
             // Parse and cache the nonces we got back
-            encache_blinding_nonces(*m_session, m_twofactor_data, get_hw_reply());
+            encache_blinding_data(*m_session, m_twofactor_data, get_hw_reply());
             // Unblind, cleanup and store the fetched txs
             m_session->store_transactions(m_subaccount, m_result);
             // Make sure we don't re-encache the same nonces again next time through
@@ -896,7 +1122,7 @@ namespace sdk {
         if (!missing.empty()) {
             // We have missing nonces we need to fetch, request them
             signal_hw_request(hw_request::get_blinding_nonces);
-            set_blinding_nonce_request_data(missing, m_twofactor_data);
+            set_blinding_nonce_request_data(get_signer(), missing, m_twofactor_data);
             return m_state;
         }
         // No missing nonces, cleanup and store the fetched txs directly
@@ -932,7 +1158,11 @@ namespace sdk {
             return;
         }
         unique_pubkeys_and_scripts_t missing;
-        auto utxos = m_session->get_unspent_outputs(m_details, missing);
+        // Fetch all UTXOs including frozen for caching, we filter out
+        // frozen UTXOs in filter_result before returning if requested.
+        auto unfiltered_details = m_details;
+        unfiltered_details["all_coins"] = true;
+        auto utxos = m_session->get_unspent_outputs(unfiltered_details, missing);
         if (missing.empty()) {
             // All results are unblinded/Don't need unblinding.
             // Encache and return them
@@ -945,7 +1175,7 @@ namespace sdk {
         // Some utxos need unblinding; ask the caller to resolve them
         m_result.swap(utxos);
         signal_hw_request(hw_request::get_blinding_nonces);
-        set_blinding_nonce_request_data(missing, m_twofactor_data);
+        set_blinding_nonce_request_data(get_signer(), missing, m_twofactor_data);
     }
 
     auth_handler::state_type get_unspent_outputs_call::call_impl()
@@ -957,7 +1187,7 @@ namespace sdk {
         }
 
         // Parse and cache the nonces we got back
-        encache_blinding_nonces(*m_session, m_twofactor_data, get_hw_reply());
+        encache_blinding_data(*m_session, m_twofactor_data, get_hw_reply());
 
         // Unblind the remaining blinded outputs we have nonces for
         // and encache the result
@@ -981,14 +1211,13 @@ namespace sdk {
 
     void get_unspent_outputs_call::filter_result(bool encache)
     {
-        if (encache) {
+        if (encache && !m_net_params.is_electrum()) {
             // Encache the unfiltered results, and set our result to a copy
             // for filtering.
             auto p = m_session->set_cached_utxos(m_details.at("subaccount"), m_details.at("num_confs"), m_result);
             m_result = *p;
         }
 
-        const bool is_liquid = m_net_params.is_liquid();
         auto& outputs = m_result.at("unspent_outputs");
         if (outputs.is_null() || outputs.empty()) {
             // Nothing to filter, return an empty json object
@@ -996,9 +1225,16 @@ namespace sdk {
             return;
         }
 
+        const bool is_liquid = m_net_params.is_liquid();
         if (is_liquid && m_details.value("confidential", false)) {
             // The user wants only confidential UTXOs, filter out non-confidential
             filter_utxos(outputs, [](const auto& u) { return !u.value("confidential", false); });
+        }
+
+        if (!m_details.value("all_coins", false)) {
+            // User did not request frozen UTXOs, filter them out
+            filter_utxos(outputs,
+                [](const auto& u) { return u.value("user_status", USER_STATUS_DEFAULT) == USER_STATUS_FROZEN; });
         }
 
         if (m_details.contains("expired_at")) {
@@ -1076,15 +1312,17 @@ namespace sdk {
 
     void set_unspent_outputs_status_call::initialize()
     {
+        m_session->ensure_full_session();
+
         GDK_RUNTIME_ASSERT(m_details.at("list").is_array());
         bool seen_frozen = false;
 
         for (auto& item : m_details["list"]) {
             auto& status = item["user_status"];
             if (status == "default") {
-                status = 0;
+                status = USER_STATUS_DEFAULT;
             } else if (status == "frozen") {
-                status = 1;
+                status = USER_STATUS_FROZEN;
                 seen_frozen = true;
             } else {
                 GDK_RUNTIME_ASSERT_MSG(false, "Unknown UTXO status");
@@ -1122,6 +1360,11 @@ namespace sdk {
 
     void change_settings_call::initialize()
     {
+        m_session->ensure_full_session();
+
+        if (m_net_params.is_electrum()) {
+            return; // Ignore nlocktime for singlesig
+        }
         const auto nlocktime_p = m_settings.find("nlocktime");
         if (nlocktime_p != m_settings.end()) {
             const uint64_t new_nlocktime = nlocktime_p->get<uint64_t>();
@@ -1165,6 +1408,8 @@ namespace sdk {
 
     void change_settings_twofactor_call::initialize()
     {
+        m_session->ensure_full_session();
+
         m_current_config = m_session->get_twofactor_config();
         const auto& current_subconfig = m_current_config.at(m_method_to_update);
 
@@ -1299,6 +1544,8 @@ namespace sdk {
 
     auth_handler::state_type update_subaccount_call::call_impl()
     {
+        m_session->ensure_full_session();
+
         nlohmann::json::const_iterator p;
         const uint32_t subaccount = m_details.value("subaccount", 0);
         if ((p = m_details.find("name")) != m_details.end()) {
@@ -1362,6 +1609,7 @@ namespace sdk {
     auth_handler::state_type remove_account_call::call_impl()
     {
         if (!m_initialized) {
+            m_session->ensure_full_session();
             signal_2fa_request("remove_account");
             m_initialized = true;
             return m_state;
@@ -1373,19 +1621,22 @@ namespace sdk {
     //
     // Send transaction
     //
-    send_transaction_call::send_transaction_call(session& session, const nlohmann::json& tx_details)
-        : auth_handler_impl(session, "send_transaction")
+    send_transaction_call::send_transaction_call(session& session, const nlohmann::json& tx_details, bool sign_only)
+        : auth_handler_impl(session, sign_only ? "sign_transaction" : "send_transaction")
         , m_tx_details(tx_details)
         , m_bump_amount(0)
+        , m_type(sign_only ? "sign" : "send")
         , m_twofactor_required(false)
         , m_under_limit(false)
         , m_initialized(false)
     {
+        // sign_only is for multisig signing by the Green service only
+        GDK_RUNTIME_ASSERT(!sign_only || !m_net_params.is_electrum());
     }
 
     void send_transaction_call::initialize()
     {
-        signal_2fa_request("send_raw_tx");
+        signal_2fa_request(m_type + "_raw_tx");
         m_twofactor_required = m_state == state_type::request_code;
 
         if (!m_net_params.is_liquid() && !m_net_params.is_electrum()) {
@@ -1431,7 +1682,7 @@ namespace sdk {
         // If we are requesting a code, either:
         // 1) Caller has 2FA configured and the tx is not under limits, OR
         // 2) Tx was thought to be under limits but limits have now changed
-        // Prevent the call from trying to send using the limit next time through the state machine
+        // Prevent the call from using the limit next time through the state machine
         m_under_limit = false;
         try {
             create_twofactor_data();
@@ -1451,11 +1702,11 @@ namespace sdk {
                 m_twofactor_data[amount_key] = m_bump_amount;
             } else {
                 if (m_under_limit) {
-                    // Tx is under the limit and a send hasn't previously failed causing
-                    // the user to enter a code. Try sending without 2fa as an under limits spend
+                    // Tx is under the limit and an attempt hasn't previously failed causing
+                    // the user to enter a code. Try again without 2fa as an under limits spend
                     m_twofactor_data["try_under_limits_spend"] = m_limit_details;
                 } else {
-                    // 2FA is provided or not configured. Add the send details
+                    // 2FA is provided or not configured. Add the details
                     m_twofactor_data["amount"] = m_limit_details["amount"];
                     m_twofactor_data["fee"] = m_limit_details["fee"];
                     m_twofactor_data["change_idx"] = m_limit_details["change_idx"];
@@ -1475,15 +1726,19 @@ namespace sdk {
 
         if (!m_net_params.is_liquid()) {
             // The api requires the request and action data to differ, which is non-optimal
-            json_rename_key(m_twofactor_data, "fee", "send_raw_tx_fee");
-            json_rename_key(m_twofactor_data, "change_idx", "send_raw_tx_change_idx");
+            json_rename_key(m_twofactor_data, "fee", m_type + "_raw_tx_fee");
+            json_rename_key(m_twofactor_data, "change_idx", m_type + "_raw_tx_change_idx");
 
-            const char* amount_key = m_bump_amount != 0u ? "bump_fee_amount" : "send_raw_tx_amount";
-            json_rename_key(m_twofactor_data, "amount", amount_key);
+            std::string key = m_bump_amount ? "bump_fee_amount" : (m_type + "_raw_tx_amount");
+            json_rename_key(m_twofactor_data, "amount", key);
         }
 
         // TODO: Add the recipient to twofactor_data for more server verification
-        m_result = m_session->send_transaction(m_tx_details, m_twofactor_data);
+        if (m_type == "send") {
+            m_result = m_session->send_transaction(m_tx_details, m_twofactor_data);
+        } else {
+            m_result = m_session->service_sign_transaction(m_tx_details, m_twofactor_data);
+        }
         return state_type::done;
     }
 
@@ -1570,6 +1825,47 @@ namespace sdk {
         } else {
             m_session->set_nlocktime(m_params, m_twofactor_data);
         }
+        return state_type::done;
+    }
+
+    //
+    // Get credentials
+    //
+    get_credentials_call::get_credentials_call(session& session, const nlohmann::json& details)
+        : auth_handler_impl(session, "get_credentials")
+        , m_details(details)
+    {
+    }
+
+    auth_handler::state_type get_credentials_call::call_impl()
+    {
+        const auto password = json_get_value(m_details, "password");
+        const auto signer = get_signer();
+        m_result = signer->get_credentials();
+        if (!password.empty()) {
+            GDK_RUNTIME_ASSERT(m_result.contains("mnemonic"));
+            GDK_RUNTIME_ASSERT_MSG(!m_result.contains("bip39_passphrase"), "cannot use password and bip39_passphrase");
+            m_result["mnemonic"] = signer->get_mnemonic(password);
+            m_result["password"] = password;
+        }
+        if (m_result.contains("username")) {
+            m_result.erase("password");
+        }
+        return state_type::done;
+    }
+
+    //
+    // Encrypt with PIN
+    //
+    encrypt_with_pin_call::encrypt_with_pin_call(session& session, const nlohmann::json& details)
+        : auth_handler_impl(session, "encrypt_with_pin")
+        , m_details(details)
+    {
+    }
+
+    auth_handler::state_type encrypt_with_pin_call::call_impl()
+    {
+        m_result["pin_data"] = m_session->encrypt_with_pin(m_details);
         return state_type::done;
     }
 } // namespace sdk

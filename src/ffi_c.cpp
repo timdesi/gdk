@@ -8,6 +8,7 @@
 #include "exception.hpp"
 #include "ga_auth_handlers.hpp"
 #include "include/gdk.h"
+#include "include/greenlight.h"
 #include "network_parameters.hpp"
 #include "session.hpp"
 #include "utils.hpp"
@@ -19,27 +20,29 @@ static boost::thread_specific_ptr<nlohmann::json> g_thread_error;
 static void set_thread_error(const char* what) { g_thread_error.reset(new nlohmann::json({ { "details", what } })); }
 
 template <typename Arg>
-static typename std::enable_if_t<!std::is_pointer<Arg>::value> assert_pointer_args(
-    const Arg& arg __attribute__((unused)))
+static typename std::enable_if_t<!std::is_pointer<Arg>::value> assert_pointer_arg(
+    const char* /*func*/, const Arg& /*arg*/)
 {
 }
 
 template <typename Arg>
-static typename std::enable_if_t<std::is_pointer<Arg>::value> assert_pointer_args(const Arg& arg)
+static typename std::enable_if_t<std::is_pointer<Arg>::value> assert_pointer_arg(const char* func, const Arg& arg)
 {
-    GDK_RUNTIME_ASSERT(arg);
+    if (!arg) {
+        GDK_RUNTIME_ASSERT_MSG(false, std::string("null argument calling ") + func);
+    }
 }
 
-template <typename... Args> static void assert_invoke_args(Args&&... args)
+template <typename... Args> static void assert_invoke_args(const char* func, Args&&... args)
 {
-    (void)std::initializer_list<int>{ (assert_pointer_args(std::forward<Args>(args)), 0)... };
+    (void)std::initializer_list<int>{ (assert_pointer_arg(func, std::forward<Args>(args)), 0)... };
 }
 
-template <typename F, typename... Args> static auto c_invoke(F&& f, Args&&... args)
+template <typename F, typename... Args> static auto c_invoke(const char* func, F&& f, Args&&... args)
 {
     try {
         g_thread_error.reset();
-        assert_invoke_args(std::forward<Args>(args)...);
+        assert_invoke_args(func, std::forward<Args>(args)...);
         f(std::forward<Args>(args)...);
         g_thread_error.reset();
         return GA_OK;
@@ -126,49 +129,49 @@ struct GA_session final : public ga::sdk::session {
     int NAME(T1 A1)                                                                                                    \
     {                                                                                                                  \
         call_timer ct(#NAME);                                                                                          \
-        return c_invoke([](T1 A1) BODY, A1);                                                                           \
+        return c_invoke(#NAME, [](T1 A1) BODY, A1);                                                                    \
     }
 
 #define GDK_DEFINE_C_FUNCTION_2(NAME, T1, A1, T2, A2, BODY)                                                            \
     int NAME(T1 A1, T2 A2)                                                                                             \
     {                                                                                                                  \
         call_timer ct(#NAME);                                                                                          \
-        return c_invoke([](T1 A1, T2 A2) BODY, A1, A2);                                                                \
+        return c_invoke(#NAME, [](T1 A1, T2 A2) BODY, A1, A2);                                                         \
     }
 
 #define GDK_DEFINE_C_FUNCTION_3(NAME, T1, A1, T2, A2, T3, A3, BODY)                                                    \
     int NAME(T1 A1, T2 A2, T3 A3)                                                                                      \
     {                                                                                                                  \
         call_timer ct(#NAME);                                                                                          \
-        return c_invoke([](T1 A1, T2 A2, T3 A3) BODY, A1, A2, A3);                                                     \
+        return c_invoke(#NAME, [](T1 A1, T2 A2, T3 A3) BODY, A1, A2, A3);                                              \
     }
 
 #define GDK_DEFINE_C_FUNCTION_4(NAME, T1, A1, T2, A2, T3, A3, T4, A4, BODY)                                            \
     int NAME(T1 A1, T2 A2, T3 A3, T4 A4)                                                                               \
     {                                                                                                                  \
         call_timer ct(#NAME);                                                                                          \
-        return c_invoke([](T1 A1, T2 A2, T3 A3, T4 A4) BODY, A1, A2, A3, A4);                                          \
+        return c_invoke(#NAME, [](T1 A1, T2 A2, T3 A3, T4 A4) BODY, A1, A2, A3, A4);                                   \
     }
 
 #define GDK_DEFINE_C_FUNCTION_5(NAME, T1, A1, T2, A2, T3, A3, T4, A4, T5, A5, BODY)                                    \
     int NAME(T1 A1, T2 A2, T3 A3, T4 A4, T5 A5)                                                                        \
     {                                                                                                                  \
         call_timer ct(#NAME);                                                                                          \
-        return c_invoke([](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5) BODY, A1, A2, A3, A4, A5);                               \
+        return c_invoke(#NAME, [](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5) BODY, A1, A2, A3, A4, A5);                        \
     }
 
 #define GDK_DEFINE_C_FUNCTION_6(NAME, T1, A1, T2, A2, T3, A3, T4, A4, T5, A5, T6, A6, BODY)                            \
     int NAME(T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6)                                                                 \
     {                                                                                                                  \
         call_timer ct(#NAME);                                                                                          \
-        return c_invoke([](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6) BODY, A1, A2, A3, A4, A5, A6);                    \
+        return c_invoke(#NAME, [](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6) BODY, A1, A2, A3, A4, A5, A6);             \
     }
 
 #define GDK_DEFINE_C_FUNCTION_7(NAME, T1, A1, T2, A2, T3, A3, T4, A4, T5, A5, T6, A6, T7, A7, BODY)                    \
     int NAME(T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6, T7 A7)                                                          \
     {                                                                                                                  \
         call_timer ct(#NAME);                                                                                          \
-        return c_invoke([](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6, T7 A7) BODY, A1, A2, A3, A4, A5, A6, A7);         \
+        return c_invoke(#NAME, [](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6, T7 A7) BODY, A1, A2, A3, A4, A5, A6, A7);  \
     }
 
 #define GDK_DEFINE_C_FUNCTION_8(NAME, T1, A1, T2, A2, T3, A3, T4, A4, T5, A5, T6, A6, T7, A7, T8, A8, BODY)            \
@@ -176,15 +179,15 @@ struct GA_session final : public ga::sdk::session {
     {                                                                                                                  \
         call_timer ct(#NAME);                                                                                          \
         return c_invoke(                                                                                               \
-            [](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6, T7 A7, T8 A8) BODY, A1, A2, A3, A4, A5, A6, A7, A8);          \
+            #NAME, [](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6, T7 A7, T8 A8) BODY, A1, A2, A3, A4, A5, A6, A7, A8);   \
     }
 
 #define GDK_DEFINE_C_FUNCTION_9(NAME, T1, A1, T2, A2, T3, A3, T4, A4, T5, A5, T6, A6, T7, A7, T8, A8, T9, A9, BODY)    \
     int NAME(T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6, T7 A7, T8 A8, T9 A9)                                            \
     {                                                                                                                  \
         call_timer ct(#NAME);                                                                                          \
-        return c_invoke([](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6, T7 A7, T8 A8, T9 A9) BODY, A1, A2, A3, A4, A5,    \
-            A6, A7, A8, A9);                                                                                           \
+        return c_invoke(#NAME, [](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6, T7 A7, T8 A8, T9 A9) BODY, A1, A2, A3, A4, \
+            A5, A6, A7, A8, A9);                                                                                       \
     }
 
 #define GDK_DEFINE_C_FUNCTION_10(                                                                                      \
@@ -192,8 +195,8 @@ struct GA_session final : public ga::sdk::session {
     int NAME(T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6, T7 A7, T8 A8, T9 A9, T10 A10)                                   \
     {                                                                                                                  \
         call_timer ct(#NAME);                                                                                          \
-        return c_invoke([](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6, T7 A7, T8 A8, T9 A9, T10 A10) BODY, A1, A2, A3,   \
-            A4, A5, A6, A7, A8, A9, A10);                                                                              \
+        return c_invoke(#NAME, [](T1 A1, T2 A2, T3 A3, T4 A4, T5 A5, T6 A6, T7 A7, T8 A8, T9 A9, T10 A10) BODY, A1,    \
+            A2, A3, A4, A5, A6, A7, A8, A9, A10);                                                                      \
     }
 
 int GA_init(const GA_json* config)
@@ -246,13 +249,11 @@ int GA_destroy_json(GA_json* json)
 GDK_DEFINE_C_FUNCTION_2(
     GA_connect, struct GA_session*, session, const GA_json*, net_params, { session->connect(*json_cast(net_params)); });
 
-GDK_DEFINE_C_FUNCTION_1(GA_disconnect, struct GA_session*, session, { session->disconnect(); })
-
 GDK_DEFINE_C_FUNCTION_2(GA_reconnect_hint, struct GA_session*, session, const GA_json*, hint,
     { session->reconnect_hint(*json_cast(hint)); });
 
-GDK_DEFINE_C_FUNCTION_2(GA_get_tor_socks5, struct GA_session*, session, char**, socks5,
-    { *socks5 = to_c_string(session->get_tor_socks5()); })
+GDK_DEFINE_C_FUNCTION_2(GA_get_proxy_settings, struct GA_session*, session, GA_json**, output,
+    { *json_cast(output) = new nlohmann::json(session->get_proxy_settings()); });
 
 GDK_DEFINE_C_FUNCTION_3(
     GA_get_wallet_identifier, const GA_json*, net_params, const GA_json*, params, GA_json**, output, {
@@ -266,28 +267,32 @@ GDK_DEFINE_C_FUNCTION_3(GA_http_request, struct GA_session*, session, const GA_j
 GDK_DEFINE_C_FUNCTION_3(GA_refresh_assets, struct GA_session*, session, const GA_json*, params, GA_json**, output,
     { *json_cast(output) = new nlohmann::json(session->refresh_assets(*json_cast(params))); });
 
+GDK_DEFINE_C_FUNCTION_3(GA_get_assets, struct GA_session*, session, const GA_json*, params, GA_json**, output,
+    { *json_cast(output) = new nlohmann::json(session->get_assets(*json_cast(params))); });
+
 GDK_DEFINE_C_FUNCTION_3(GA_validate_asset_domain_name, struct GA_session*, session, const GA_json*, params, GA_json**,
     output, { *json_cast(output) = new nlohmann::json(session->validate_asset_domain_name(*json_cast(params))); });
 
-GDK_DEFINE_C_FUNCTION_4(GA_register_user, struct GA_session*, session, const GA_json*, hw_device, const char*, mnemonic,
-    struct GA_auth_handler**, call,
-    { *call = make_call(new ga::sdk::register_call(*session, *json_cast(hw_device), mnemonic)); })
+GDK_DEFINE_C_FUNCTION_4(GA_register_user, struct GA_session*, session, const GA_json*, hw_device, const GA_json*,
+    details, struct GA_auth_handler**, call,
+    { *call = make_call(new ga::sdk::register_call(*session, *json_cast(hw_device), *json_cast(details))); })
 
 GDK_DEFINE_C_FUNCTION_4(GA_login_user, struct GA_session*, session, const GA_json*, hw_device, const GA_json*, details,
     struct GA_auth_handler**, call,
     { *call = make_call(new ga::sdk::login_user_call(*session, *json_cast(hw_device), *json_cast(details))); })
 
 GDK_DEFINE_C_FUNCTION_3(GA_set_watch_only, struct GA_session*, session, const char*, username, const char*, password,
-    { session->set_watch_only(username, password); })
+    { session->set_wo_credentials(username, password); })
 
 GDK_DEFINE_C_FUNCTION_2(GA_get_watch_only_username, struct GA_session*, session, char**, username,
-    { *username = to_c_string(session->get_watch_only_username()); })
+    { *username = to_c_string(session->get_wo_username()); })
 
 GDK_DEFINE_C_FUNCTION_2(GA_get_fee_estimates, struct GA_session*, session, GA_json**, estimates,
     { *json_cast(estimates) = new nlohmann::json(session->get_fee_estimates()); })
 
-GDK_DEFINE_C_FUNCTION_3(GA_get_mnemonic_passphrase, struct GA_session*, session, const char*, password, char**,
-    mnemonic, { *mnemonic = to_c_string(session->get_mnemonic_passphrase(password ? password : std::string())); })
+GDK_DEFINE_C_FUNCTION_3(GA_get_credentials, struct GA_session*, session, const GA_json*, details,
+    struct GA_auth_handler**, call,
+    { *call = make_call(new ga::sdk::get_credentials_call(*session, *json_cast(details))); })
 
 GDK_DEFINE_C_FUNCTION_2(GA_get_system_message, struct GA_session*, session, char**, message_text,
     { *message_text = to_c_string(session->get_system_message()); })
@@ -315,6 +320,13 @@ GDK_DEFINE_C_FUNCTION_3(GA_sign_pset, struct GA_session*, session, const GA_json
     struct GA_auth_handler**, call,
     { *call = make_call(new ga::sdk::sign_pset_call(*session, *json_cast(pset_details))); })
 
+GDK_DEFINE_C_FUNCTION_3(GA_psbt_sign, struct GA_session*, session, const GA_json*, details, struct GA_auth_handler**,
+    call, { *call = make_call(new ga::sdk::psbt_sign_call(*session, *json_cast(details))); })
+
+GDK_DEFINE_C_FUNCTION_3(GA_psbt_get_details, struct GA_session*, session, const GA_json*, details,
+    struct GA_auth_handler**, call,
+    { *call = make_call(new ga::sdk::psbt_get_details_call(*session, *json_cast(details))); })
+
 GDK_DEFINE_C_FUNCTION_1(GA_send_nlocktimes, struct GA_session*, session, { session->send_nlocktimes(); })
 
 GDK_DEFINE_C_FUNCTION_3(
@@ -335,11 +347,18 @@ GDK_DEFINE_C_FUNCTION_4(GA_set_transaction_memo, struct GA_session*, session, co
         session->set_transaction_memo(txhash_hex, memo);
     })
 
-GDK_DEFINE_C_FUNCTION_3(
-    GA_set_notification_handler, struct GA_session*, session, GA_notification_handler, handler, void*, context, {
-        GDK_RUNTIME_ASSERT(handler);
+int GA_set_notification_handler(struct GA_session* session, GA_notification_handler handler, void* context)
+{
+    try {
+        GDK_RUNTIME_ASSERT_MSG(session, "null argument calling GA_set_notification_handler");
         session->set_notification_handler(handler, context);
-    })
+    } catch (const std::exception& e) {
+        set_thread_error(e.what());
+        return GA_ERROR;
+    }
+    g_thread_error.reset();
+    return GA_OK;
+}
 
 GDK_DEFINE_C_FUNCTION_2(GA_remove_account, struct GA_session*, session, struct GA_auth_handler**, call,
     { *call = make_call(new ga::sdk::remove_account_call(*session)); });
@@ -348,8 +367,9 @@ GDK_DEFINE_C_FUNCTION_3(GA_create_subaccount, struct GA_session*, session, const
     struct GA_auth_handler**, call,
     { *call = make_call(new ga::sdk::create_subaccount_call(*session, *json_cast(details))); })
 
-GDK_DEFINE_C_FUNCTION_2(GA_get_subaccounts, struct GA_session*, session, struct GA_auth_handler**, call,
-    { *call = make_call(new ga::sdk::get_subaccounts_call(*session)); })
+GDK_DEFINE_C_FUNCTION_3(GA_get_subaccounts, struct GA_session*, session, const GA_json*, details,
+    struct GA_auth_handler**, call,
+    { *call = make_call(new ga::sdk::get_subaccounts_call(*session, *json_cast(details))); })
 
 GDK_DEFINE_C_FUNCTION_3(GA_get_subaccount, struct GA_session*, session, uint32_t, subaccount, struct GA_auth_handler**,
     call, { *call = make_call(new ga::sdk::get_subaccount_call(*session, subaccount)); })
@@ -399,9 +419,9 @@ GDK_DEFINE_C_FUNCTION_2(GA_get_available_currencies, struct GA_session*, session
 GDK_DEFINE_C_FUNCTION_3(GA_convert_amount, struct GA_session*, session, const GA_json*, value_details, GA_json**,
     output, { *json_cast(output) = new nlohmann::json(session->convert_amount(*json_cast(value_details))); })
 
-GDK_DEFINE_C_FUNCTION_5(GA_set_pin, struct GA_session*, session, const char*, mnemonic, const char*, pin, const char*,
-    device_id, GA_json**, pin_data,
-    { *json_cast(pin_data) = new nlohmann::json(session->set_pin(mnemonic, pin, device_id)); })
+GDK_DEFINE_C_FUNCTION_3(GA_encrypt_with_pin, struct GA_session*, session, const GA_json*, details,
+    struct GA_auth_handler**, call,
+    { *call = make_call(new ga::sdk::encrypt_with_pin_call(*session, *json_cast(details))); });
 
 GDK_DEFINE_C_FUNCTION_1(GA_disable_all_pin_logins, struct GA_session*, session, { session->disable_all_pin_logins(); })
 
@@ -498,3 +518,6 @@ GDK_DEFINE_C_FUNCTION_3(GA_convert_json_value_to_json, const GA_json*, json, con
     json_convert(*json_cast(json), path, v);
     *json_cast(output) = v;
 })
+
+GDK_DEFINE_C_FUNCTION_4(GA_gl_call, struct GA_session*, session, const char*, method, const GA_json*, params, GA_json**,
+    output, { *json_cast(output) = new nlohmann::json(session->gl_call(method, *json_cast(params))); })

@@ -69,7 +69,7 @@ class Call(object):
 
 
 class Session(object):
-    """A GreenAddress session
+    """A session representing either a Green multisig or a singlesig wallet.
 
     """
 
@@ -78,9 +78,9 @@ class Session(object):
     @staticmethod
     @atexit.register
     def destroy_all():
-        for session in Session.to_destroy:
+        while len(Session.to_destroy):
+            session = Session.to_destroy.pop()
             session._destroy()
-        Session.to_destroy = []
 
     def __init__(self, net_params):
         self.notifications = queue.Queue()
@@ -90,16 +90,24 @@ class Session(object):
         return self.connect(net_params)
 
     def _destroy(self):
-        destroy_session(self.session_obj)
+        if getattr(self, 'session_obj', None):
+            obj = self.session_obj
+            self.session_obj = None
+            _python_set_callback_handler(obj, None)
+            _python_destroy_session(obj)
 
     def destroy(self):
-        self._destroy()
-        Session.to_destroy.remove(self)
+        if self in Session.to_destroy:
+            Session.to_destroy.remove(self)
+            self._destroy()
 
     def __enter__(self):
         return self
 
     def __exit__(self, *args):
+        self.destroy()
+
+    def __del__(self):
         self.destroy()
 
     def _callback_handler(self, obj, event):
@@ -127,20 +135,22 @@ class Session(object):
         return connect(self.session_obj, self._to_json(net_params))
 
     def disconnect(self):
-        return disconnect(self.session_obj)
+        raise RuntimeError('use reconnect_hint() to disconnect a session')
 
     def reconnect_hint(self, hint):
         return reconnect_hint(self.session_obj, self._to_json(hint))
 
-    def get_tor_socks5(self):
-        return get_tor_socks5(self.session_obj)
+    def get_proxy_settings(self):
+        return json.loads(get_proxy_settings(self.session_obj))
 
     @staticmethod
     def get_wallet_identifier(net_params, params):
         return json.loads(get_wallet_identifier(Session._to_json(net_params), Session._to_json(params)))
 
-    def register_user(self, hw_device, mnemonic):
-        return Call(register_user(self.session_obj, self._to_json(hw_device), mnemonic))
+    def register_user(self, hw_device, details):
+        if isinstance(details, basestring):
+            raise RuntimeError('credentials details must be a dict')
+        return Call(register_user(self.session_obj, self._to_json(hw_device), self._to_json(details)))
 
     def login_user(self, hw_device, details):
         return Call(login_user(self.session_obj, self._to_json(hw_device), self._to_json(details)))
@@ -155,8 +165,8 @@ class Session(object):
     def remove_account(self):
         return Call(remove_account(self.session_obj))
 
-    def set_pin(self, mnemonic, pin, device_id):
-        return json.loads(set_pin(self.session_obj, mnemonic, pin, device_id))
+    def encrypt_with_pin(self, details):
+        return Call(encrypt_with_pin(self.session_obj, self._to_json(details)))
 
     def disable_all_pin_logins(self):
         return disable_all_pin_logins(self.session_obj)
@@ -170,8 +180,9 @@ class Session(object):
     def update_subaccount(self, details):
         return Call(update_subaccount(self.session_obj, self._to_json(details)))
 
-    def get_subaccounts(self):
-        return Call(get_subaccounts(self.session_obj))
+    def get_subaccounts(self, details=None):
+        details = details or {}
+        return Call(get_subaccounts(self.session_obj, self._to_json(details)))
 
     def get_subaccount(self, subaccount):
         return Call(get_subaccount(self.session_obj, subaccount))
@@ -179,7 +190,8 @@ class Session(object):
     def get_transactions(self, details={'subaccount': 0, 'first': 0, 'count': 30}):
         return Call(get_transactions(self.session_obj, self._to_json(details)))
 
-    def get_receive_address(self, details={}):
+    def get_receive_address(self, details=None):
+        details = details or {}
         return Call(get_receive_address(self.session_obj, self._to_json(details)))
 
     def get_previous_addresses(self, details={'subaccount': 0, 'last_pointer': 0}):
@@ -214,6 +226,12 @@ class Session(object):
     def sign_transaction(self, transaction_details):
         return Call(sign_transaction(self.session_obj, self._to_json(transaction_details)))
 
+    def psbt_sign(self, details):
+        return Call(psbt_sign(self.session_obj, self._to_json(details)))
+
+    def psbt_get_details(self, details):
+        return Call(psbt_get_details(self.session_obj, self._to_json(details)))
+
     def send_transaction(self, transaction_details):
         return Call(send_transaction(self.session_obj, self._to_json(transaction_details)))
 
@@ -235,8 +253,8 @@ class Session(object):
     def get_fee_estimates(self):
         return json.loads(get_fee_estimates(self.session_obj))
 
-    def get_mnemonic_passphrase(self, password):
-        return get_mnemonic_passphrase(self.session_obj, password)
+    def get_credentials(self, details):
+        return Call(get_credentials(self.session_obj, self._to_json(details)))
 
     def get_system_message(self):
         return get_system_message(self.session_obj)
@@ -274,9 +292,14 @@ class Session(object):
     def refresh_assets(self, params):
         return json.loads(refresh_assets(self.session_obj, self._to_json(params)))
 
+    def get_assets(self, params):
+        return json.loads(get_assets(self.session_obj, self._to_json(params)))
+
     def validate_asset_domain_name(self, params):
         return json.loads(validate_asset_domain_name(self.session_obj, self._to_json(params)))
 
+    def gl_call(self, method, params):
+        return json.loads(gl_call(self.session_obj, method, self._to_json(params)))
 
 _old_get_networks = get_networks
 def get_networks():

@@ -5,26 +5,27 @@ import ga.sdk
 import ga.wally
 
 public enum GaError: Error {
-    case GenericError
-    case ReconnectError
-    case SessionLost
-    case TimeoutError
-    case NotAuthorizedError
+    case GenericError(_ localizedDescription: String? = nil)
+    case ReconnectError(_ localizedDescription: String? = nil)
+    case SessionLost(_ localizedDescription: String? = nil)
+    case TimeoutError(_ localizedDescription: String? = nil)
+    case NotAuthorizedError(_ localizedDescription: String? = nil)
 }
 
 fileprivate func errorWrapper(_ r: Int32) throws {
     guard r == GA_OK else {
+        let msg = try? getThreadErrorDetails()
         switch r {
             case GA_RECONNECT:
-                throw GaError.ReconnectError
+            throw GaError.ReconnectError(msg)
             case GA_SESSION_LOST:
-                throw GaError.SessionLost
+                throw GaError.SessionLost(msg)
             case GA_TIMEOUT:
-                throw GaError.TimeoutError
+                throw GaError.TimeoutError(msg)
             case GA_NOT_AUTHORIZED:
-                throw GaError.NotAuthorizedError
+                throw GaError.NotAuthorizedError(msg)
             default:
-                throw GaError.GenericError
+                throw GaError.GenericError(msg)
         }
     }
 }
@@ -72,6 +73,27 @@ fileprivate func convertOpaqueJsonToDict(o: OpaquePointer) throws -> [String: An
     return convertJSONBytesToDict(buff!)
 }
 
+fileprivate func convertOpaqueJsonValueToString(o: OpaquePointer, path: String) throws -> String? {
+    var buff: UnsafeMutablePointer<Int8>? = nil
+    defer {
+        GA_destroy_string(buff)
+    }
+    try callWrapper(fun: GA_convert_json_value_to_string(o, path, &buff))
+    if let buff = buff {
+        return String(cString: buff)
+    }
+    return nil
+}
+
+public func getThreadErrorDetails() throws -> String? {
+    var details: OpaquePointer? = nil
+    defer {
+        GA_destroy_json(details)
+    }
+    GA_get_thread_error_details(&details)
+    return try convertOpaqueJsonValueToString(o: details!, path: "details")
+}
+
 // Dummy resolver for Hardware calls
 public func DummyResolve(call: TwoFactorCall) throws -> [String : Any] {
     while true {
@@ -82,8 +104,8 @@ public func DummyResolve(call: TwoFactorCall) throws -> [String : Any] {
         } else if status == "done" {
             return json!
         } else {
-            // FIXME: if status == "error", return the error message in "error"
-            throw GaError.GenericError
+            let err = json?["error"] as? String
+            throw GaError.GenericError(err)
         }
     }
 }
@@ -129,17 +151,8 @@ public class TwoFactorCall {
 }
 
 public typealias NotificationCompletionHandler = (_ notification: [String: Any]?) -> Void
-
-fileprivate class NotificationContext {
-    private var session: OpaquePointer
-
-    var notificationCompletionHandler: NotificationCompletionHandler
-
-    init(session: OpaquePointer, notificationCompletionHandler: @escaping NotificationCompletionHandler) {
-        self.session = session
-        self.notificationCompletionHandler = notificationCompletionHandler
-    }
-}
+fileprivate var notificationContexts = [NSString: NotificationCompletionHandler?]()
+fileprivate let queue = DispatchQueue(label: "BarrierQueue", attributes: .concurrent)
 
 public func gdkInit(config: [String: Any]) throws {
     var config_json: OpaquePointer = try convertDictToJSON(dict: config)
@@ -153,28 +166,46 @@ public class Session {
     private typealias NotificationHandler = @convention(c) (UnsafeMutableRawPointer?, OpaquePointer?) -> Void
 
     private let notificationHandler : NotificationHandler = { (context: UnsafeMutableRawPointer?, details: OpaquePointer?) -> Void in
-        let context : NotificationContext = Unmanaged.fromOpaque(context!).takeUnretainedValue()
-        if let jsonDetails = details {
-            let dict = try! convertOpaqueJsonToDict(o: jsonDetails)
-            context.notificationCompletionHandler(dict)
+        queue.async(flags: .barrier) {
+            if let context = context {
+                let string = String(cString: context.assumingMemoryBound(to: CChar.self))
+                if let nsString = NSString(utf8String: string),
+                    let notificationContext = notificationContexts[nsString],
+                    let notificationContext = notificationContext,
+                    let jsonDetails = details,
+                    let dict = try! convertOpaqueJsonToDict(o: jsonDetails) {
+                    notificationContext(dict)
+                }
+            }
         }
     }
 
     private var session: OpaquePointer? = nil
-    private var notificationContext: NotificationContext? = nil
+    private let uuid: String
 
-    private func setNotificationHandler(notificationCompletionHandler: @escaping NotificationCompletionHandler) throws {
-        notificationContext = NotificationContext(session: session!, notificationCompletionHandler: notificationCompletionHandler)
-        let context = UnsafeMutableRawPointer(Unmanaged.passUnretained(self.notificationContext!).toOpaque())
-        try callWrapper(fun: GA_set_notification_handler(session, notificationHandler, context))
+    func setNotificationHandler(notificationCompletionHandler: NotificationCompletionHandler?) {
+        queue.sync() {
+            guard let notificationCompletionHandler = notificationCompletionHandler else {
+                let nsString = NSString(string: self.uuid)
+                if notificationContexts.keys.contains(nsString) {
+                    notificationContexts[nsString] = nil
+                }
+                return
+            }
+            let nsString = NSString(string: self.uuid)
+            notificationContexts[nsString] = notificationCompletionHandler
+            let ctx = UnsafeMutablePointer<Int8>(mutating: nsString.utf8String)
+            try? callWrapper(fun: GA_set_notification_handler(self.session, self.notificationHandler, ctx))
+        }
     }
 
-    public init(notificationCompletionHandler: @escaping NotificationCompletionHandler) throws {
+    public init() throws {
+        self.uuid = UUID().uuidString
         try callWrapper(fun: GA_create_session(&session))
-        try setNotificationHandler(notificationCompletionHandler: notificationCompletionHandler)
     }
 
     deinit {
+        setNotificationHandler(notificationCompletionHandler: nil)
         GA_destroy_session(session)
     }
 
@@ -212,10 +243,6 @@ public class Session {
         try callWrapper(fun: GA_connect(session, netParamsJson))
     }
 
-    public func disconnect() throws {
-        try callWrapper(fun: GA_disconnect(session))
-    }
-
     public func reconnectHint(hint: [String: Any]) throws {
         var hintJson: OpaquePointer = try convertDictToJSON(dict: hint)
         defer {
@@ -224,21 +251,20 @@ public class Session {
         try callWrapper(fun: GA_reconnect_hint(session, hintJson))
     }
 
-    public func getTorSocks5() throws -> String {
-        var buff: UnsafeMutablePointer<Int8>? = nil
-        try callWrapper(fun: GA_get_tor_socks5(session, &buff))
-        defer {
-            GA_destroy_string(buff)
-        }
-        return String(cString: buff!)
+    public func getProxySettings() throws -> [String: Any]? {
+        var result: OpaquePointer? = nil
+        try callWrapper(fun: GA_get_proxy_settings(session, &result))
+        return try convertOpaqueJsonToDict(o: result!)
     }
 
-    public func registerUser(mnemonic: String, hw_device: [String: Any] = [:]) throws -> TwoFactorCall {
+    public func registerUser(details: [String: Any], hw_device: [String: Any] = [:]) throws -> TwoFactorCall {
         var optr: OpaquePointer? = nil;
         var hw_device_json: OpaquePointer = try convertDictToJSON(dict: hw_device)
-        try callWrapper(fun: GA_register_user(session, hw_device_json, mnemonic, &optr))
+        var details_json: OpaquePointer = try convertDictToJSON(dict: details)
+        try callWrapper(fun: GA_register_user(session, hw_device_json, details_json, &optr))
         defer {
             GA_destroy_json(hw_device_json)
+            GA_destroy_json(details_json)
         }
         return TwoFactorCall(optr: optr!);
     }
@@ -278,10 +304,8 @@ public class Session {
         return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_create_subaccount)
     }
 
-    public func getSubaccounts() throws -> TwoFactorCall {
-        var optr: OpaquePointer? = nil
-        try callWrapper(fun: GA_get_subaccounts(session, &optr))
-        return TwoFactorCall(optr: optr!)
+    public func getSubaccounts(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_get_subaccounts)
     }
 
     public func getSubaccount(subaccount: UInt32) throws -> TwoFactorCall {
@@ -292,6 +316,10 @@ public class Session {
 
     public func renameSubaccount(subaccount: UInt32, newName: String) throws -> Void {
         try callWrapper(fun: GA_rename_subaccount(session, subaccount, newName));
+    }
+
+    public func updateSubaccount(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_update_subaccount)
     }
 
     public func getTransactions(details: [String: Any]) throws -> TwoFactorCall {
@@ -328,10 +356,8 @@ public class Session {
         return try voidFuncToJsonWrapper(fun: GA_get_available_currencies)
     }
 
-    public func setPin(mnemonic: String, pin: String, device: String) throws -> [String: Any]? {
-        var result: OpaquePointer? = nil
-        try callWrapper(fun: GA_set_pin(session, mnemonic, pin, device, &result))
-        return try convertOpaqueJsonToDict(o: result!)
+    public func encryptWithPin(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_encrypt_with_pin)
     }
 
     public func disableAllPinLogins() throws -> Void {
@@ -352,6 +378,14 @@ public class Session {
 
     public func signTransaction(details: [String: Any]) throws -> TwoFactorCall {
         return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_sign_transaction)
+    }
+
+    public func signPsbt(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_psbt_sign)
+    }
+
+    public func PsbtGetDetails(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_psbt_get_details)
     }
 
     public func sendTransaction(details: [String: Any]) throws -> TwoFactorCall {
@@ -448,13 +482,20 @@ public class Session {
         return try voidFuncToJsonWrapper(fun: GA_get_fee_estimates)
     }
 
-    public func getMnemonicPassphrase(password: String) throws -> String {
-        var buff: UnsafeMutablePointer<Int8>? = nil
-        try callWrapper(fun: GA_get_mnemonic_passphrase(session, password, &buff))
+    public func getCredentials(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_get_credentials)
+    }
+
+    public func getWalletIdentifier(net_params: [String: Any], details: [String: Any]) throws -> [String: Any]? {
+        var result: OpaquePointer? = nil
+        let net_params_: OpaquePointer = try convertDictToJSON(dict: net_params)
+        let details_: OpaquePointer = try convertDictToJSON(dict: details)
+        try callWrapper(fun: GA_get_wallet_identifier(net_params_, details_, &result))
         defer {
-            GA_destroy_string(buff)
+            GA_destroy_json(net_params_)
+            GA_destroy_json(details_)
         }
-        return String(cString: buff!)
+        return try convertOpaqueJsonToDict(o: result!)
     }
 
     public func httpRequest(params: [String: Any]) throws -> [String: Any]? {
@@ -465,6 +506,10 @@ public class Session {
         return try jsonFuncToJsonWrapper(input: params, fun: GA_refresh_assets)
     }
 
+    public func getAssets(params: [String: Any]) throws -> [String: Any]? {
+        return try jsonFuncToJsonWrapper(input: params, fun: GA_get_assets)
+    }
+
     public func validateAssetDomainName(params: [String: Any]) throws -> [String: Any]? {
         return try jsonFuncToJsonWrapper(input: params, fun: GA_validate_asset_domain_name)
     }
@@ -472,9 +517,7 @@ public class Session {
 
 public func generateMnemonic() throws -> String {
     var buff : UnsafeMutablePointer<Int8>? = nil
-    guard GA_generate_mnemonic(&buff) == GA_OK else {
-        throw GaError.GenericError
-    }
+    try callWrapper(fun: GA_generate_mnemonic(&buff))
     defer {
         GA_destroy_string(buff)
     }
@@ -483,9 +526,7 @@ public func generateMnemonic() throws -> String {
 
 public func generateMnemonic12() throws -> String {
     var buff : UnsafeMutablePointer<Int8>? = nil
-    guard GA_generate_mnemonic_12(&buff) == GA_OK else {
-        throw GaError.GenericError
-    }
+    try callWrapper(fun: GA_generate_mnemonic_12(&buff))
     defer {
         GA_destroy_string(buff)
     }
@@ -537,15 +578,15 @@ func compressPublicKey(_ publicKey: [UInt8]) throws -> [UInt8] {
     switch publicKey[0] {
     case 0x04:
         if publicKey.count != 65 {
-            throw GaError.GenericError
+            throw GaError.GenericError()
         }
     case 0x02, 0x03:
         if publicKey.count != 33 {
-            throw GaError.GenericError
+            throw GaError.GenericError()
         }
         return publicKey
     default:
-        throw GaError.GenericError
+        throw GaError.GenericError()
     }
     let type = publicKey[64] & 1 != 0 ? 0x03 : 0x02
     return [UInt8(type)] + publicKey[1..<32+1]
@@ -563,10 +604,10 @@ public func bip32KeyToBase58(isMainnet: Bool = true, pubKey: [UInt8], chainCode:
     }
     if (bip32_key_init_alloc(UInt32(version), UInt32(1), UInt32(0), chainCode_, chainCode.count,
                              pubKey_, pubKey.count, nil, 0, nil, 0, nil, 0, &extkey) != WALLY_OK) {
-        throw GaError.GenericError
+        throw GaError.GenericError()
     }
     if (bip32_key_to_base58(extkey, UInt32(BIP32_FLAG_KEY_PUBLIC), &base58) != WALLY_OK) {
-        throw GaError.GenericError
+        throw GaError.GenericError()
     }
     return String(cString: base58!)
 }

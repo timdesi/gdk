@@ -6,10 +6,12 @@ have_cmd()
     command -v "$1" >/dev/null 2>&1
 }
 
-if [ -f /proc/cpuinfo ]; then
-    export NUM_JOBS=${NUM_JOBS:-$(cat /proc/cpuinfo | grep ^processor | wc -l)}
+if [ -z "${NUM_JOBS}" ]; then
+    if [ -f /proc/cpuinfo ]; then
+        export NUM_JOBS=${NUM_JOBS:-$(cat /proc/cpuinfo | grep ^processor | wc -l)}
+    fi
+    export NUM_JOBS=${NUM_JOBS:-4}
 fi
-export NUM_JOBS=${NUM_JOBS:-4}
 
 ANALYZE=false
 LIBTYPE="shared"
@@ -20,7 +22,6 @@ COMPILER_VERSION=""
 BUILD=""
 BUILDTYPE="release"
 NDK_ARCH=""
-LTO="false"
 CCACHE="$(which ccache)" || CCACHE=""
 
 GETOPT='getopt'
@@ -36,7 +37,15 @@ if [ "$(uname)" = "Darwin" ]; then
     GETOPT='/usr/local/opt/gnu-getopt/bin/getopt'
     export NDK_TOOLSDIR="$ANDROID_NDK/toolchains/llvm/prebuilt/darwin-x86_64"
     export SED=gsed
-    export HOST_OS="x86_64-apple-darwin"
+    if [ "$(uname -m)" = "arm64" ]; then
+        export HOST_OS="aarch64-apple-darwin"
+        export SDK_ARCH="aarch64"
+        export SDK_CPU="arm64"
+    else
+        export SDK_ARCH="x86_64"
+        export SDK_CPU="x86_64"
+        export HOST_OS="x86_64-apple-darwin"
+    fi
 elif [ "$(uname)" = "FreeBSD" ]; then
     GETOPT='/usr/local/bin/getopt'
 fi
@@ -59,7 +68,7 @@ if (($# < 1)); then
     exit 0
 fi
 
-TEMPOPT=`"$GETOPT" -n "build.sh" -o x,b: -l enable-tests,analyze,clang,gcc,mingw-w64,prefix:,install:,sanitizer:,compiler-version:,ndk:,iphone:,iphonesim:,buildtype:,lto:,clang-tidy-version:,disableccache,python-version:,enable-rust -- "$@"`
+TEMPOPT=`"$GETOPT" -n "build.sh" -o x,b: -l enable-tests,analyze,clang,gcc,mingw-w64,prefix:,install:,sanitizer:,compiler-version:,ndk:,iphone:,iphonesim:,buildtype:,clang-tidy-version:,disableccache,python-version: -- "$@"`
 eval set -- "$TEMPOPT"
 while true; do
     case "$1" in
@@ -72,12 +81,10 @@ while true; do
         --iphone | --iphonesim ) BUILD="$1"; LIBTYPE="$2"; shift 2 ;;
         --ndk ) BUILD="$1"; NDK_ARCH="$2"; shift 2 ;;
         --compiler-version) COMPILER_VERSION="-$2"; shift 2 ;;
-        --lto) MESON_OPTIONS="$MESON_OPTIONS -Db_lto=$2"; LTO="$2"; shift 2 ;;
         --clang-tidy-version) MESON_OPTIONS="$MESON_OPTIONS -Dclang-tidy-version=-$2"; NINJA_TARGET="src/clang-tidy"; shift 2 ;;
         --prefix) MESON_OPTIONS="$MESON_OPTIONS --prefix=$2"; shift 2 ;;
         --disableccache) CCACHE="" ; shift ;;
         --python-version) MESON_OPTIONS="$MESON_OPTIONS -Dpython-version=$2"; shift 2 ;;
-        --enable-rust ) MESON_OPTIONS="$MESON_OPTIONS -Denable-rust=true"; shift ;;
         -- ) shift; break ;;
         *) break ;;
     esac
@@ -245,9 +252,8 @@ if [ \( "$BUILD" = "--ndk" \) ]; then
                 arm64-v8a) clangarchname=aarch64;;
                 x86) clangarchname=i686;;
             esac
-            export SDK_PLATFORM=$(basename $NDK_TOOLSDIR/bin/$archfilename-linux-android*-strip | $SED 's/-strip$//')
-            export AR="$NDK_TOOLSDIR/bin/$SDK_PLATFORM-ar"
-            export RANLIB="$NDK_TOOLSDIR/bin/$SDK_PLATFORM-ranlib"
+            export AR="$NDK_TOOLSDIR/bin/llvm-ar"
+            export RANLIB="$NDK_TOOLSDIR/bin/llvm-ranlib"
 
             ./tools/make_txt.sh $bld_root $bld_root/$1_$2_ndk.txt $1 ndk $2
             compress_patch
@@ -278,12 +284,8 @@ if [ \( "$BUILD" = "--iphone" \) -o \( "$BUILD" = "--iphonesim" \) ]; then
         export AR=ar
         export CC=${XCODE_DEFAULT_PATH}/clang
         export CXX=${XCODE_DEFAULT_PATH}/clang++
-        export CFLAGS="${SDK_CFLAGS} -isysroot ${IOS_SDK_PATH} -miphoneos-version-min=11.0 -O3 ${EXTRA_FLAGS} -fembed-bitcode"
-        export LDFLAGS="${SDK_LDFLAGS} -isysroot ${IOS_SDK_PATH} -miphoneos-version-min=11.0 ${EXTRA_FLAGS}"
-        if [ \( $BUILD = "--iphonesim" \)  -a \( "$(sw_vers -productVersion)" = "10.15" \) ]; then
-            export DYLD_ROOT_PATH=/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk
-        fi
-
+        export CFLAGS="${IOS_CFLAGS} ${EXTRA_FLAGS}"
+        export LDFLAGS="${IOS_LDFLAGS} ${EXTRA_FLAGS}"
         if [ ! -f "build-clang-$1-$2/build.ninja" ]; then
             rm -rf build-clang-$1-$2/meson-private
             mkdir -p build-clang-$1-$2

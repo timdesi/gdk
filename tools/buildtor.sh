@@ -19,10 +19,6 @@ CONFIGURE_ARGS="--prefix=${MESON_BUILD_ROOT}/tor/build --disable-system-torrc --
                 ac_cv_c_bigendian=no --disable-unittests --disable-tool-name-check --disable-module-dirauth \
                 --disable-libscrypt --disable-rust"
 
-if [ "$LTO" = "true" ]; then
-    EXTRA_FLAGS="-flto"
-fi
-
 # patch for autoconf >= 2.70
 sed -ie "s!^AC_PROG_CC_C99!!" configure.ac
 
@@ -38,8 +34,8 @@ elif [ \( "$1" = "--iphone" \) -o \( "$1" = "--iphonesim" \) ]; then
     sh autogen.sh
     . ${MESON_SOURCE_ROOT}/tools/ios_env.sh $1
 
-    export CFLAGS="$SDK_CFLAGS -isysroot ${IOS_SDK_PATH} -miphoneos-version-min=11.0 -O3 $EXTRA_FLAGS"
-    export LDFLAGS="$SDK_LDFLAGS -isysroot ${IOS_SDK_PATH} -miphoneos-version-min=11.0  $EXTRA_FLAGS"
+    export CFLAGS="$IOS_CFLAGS $EXTRA_FLAGS"
+    export LDFLAGS="$IOS_LDFLAGS $EXTRA_FLAGS"
     export CC=${XCODE_DEFAULT_PATH}/clang
     export CXX=${XCODE_DEFAULT_PATH}/clang++
 

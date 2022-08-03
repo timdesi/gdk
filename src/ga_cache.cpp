@@ -5,11 +5,11 @@
 
 #include "assertion.hpp"
 #include "ga_cache.hpp"
-#include "inbuilt.hpp"
 #include "logging.hpp"
 #include "memory.hpp"
 #include "network_parameters.hpp"
 #include "session.hpp"
+#include "signer.hpp"
 #include "sqlite3/sqlite3.h"
 #include "utils.hpp"
 
@@ -18,7 +18,13 @@ namespace sdk {
 
     namespace {
 
+        // Cache types, each has a different filename for the cache file
+        constexpr uint32_t CT_SW = 0; // Software wallet cache
+        constexpr uint32_t CT_HW = 1; // Hardware wallet cache
+        constexpr uint32_t CT_WO = 2; // Watch-only wallet cache
+
         constexpr int VERSION = 1;
+        constexpr int MINOR_VERSION = 0x1;
         constexpr const char* KV_SELECT = "SELECT value FROM KeyValue WHERE key = ?1;";
         constexpr const char* TX_SELECT = "SELECT timestamp, txid, block, spent, spv_status, data FROM Tx "
                                           "WHERE subaccount = ?1 ORDER BY timestamp DESC LIMIT ?2 OFFSET ?3;";
@@ -63,9 +69,11 @@ namespace sdk {
             exec_check(
                 "CREATE TABLE IF NOT EXISTS KeyValue(key BLOB NOT NULL, value BLOB NOT NULL, PRIMARY KEY(key));");
 
+            exec_check("CREATE TABLE IF NOT EXISTS LiquidBlindingPubKey(script BLOB NOT NULL, "
+                       "pubkey BLOB NOT NULL, PRIMARY KEY(script));");
+
             exec_check("CREATE TABLE IF NOT EXISTS LiquidBlindingNonce(pubkey BLOB NOT NULL, script BLOB NOT NULL, "
-                       "nonce BLOB NOT "
-                       "NULL, PRIMARY KEY(pubkey, script));");
+                       "nonce BLOB NOT NULL, PRIMARY KEY(pubkey, script));");
 
             exec_check(
                 "CREATE TABLE IF NOT EXISTS Tx(subaccount INTEGER NOT NULL, timestamp INTEGER NOT NULL, txid BLOB "
@@ -74,6 +82,16 @@ namespace sdk {
 
             exec_check(
                 "CREATE TABLE IF NOT EXISTS TxData(txid BLOB NOT NULL, rawtx BLOB NOT NULL, PRIMARY KEY(txid));");
+
+            exec_check("CREATE TABLE IF NOT EXISTS ScriptPubKey("
+                       "scriptpubkey BLOB NOT NULL,"
+                       "subaccount INTEGER NOT NULL,"
+                       "branch INTEGER NOT NULL,"
+                       "pointer INTEGER NOT NULL,"
+                       "subtype INTEGER NOT NULL,"
+                       "script_type INTEGER NOT NULL,"
+                       "PRIMARY KEY(scriptpubkey),"
+                       "UNIQUE(subaccount, pointer DESC));");
             return db;
         }
 
@@ -129,12 +147,12 @@ namespace sdk {
         static void save_db_file(byte_span_t key, byte_span_t data, const std::string& path)
         {
             GDK_RUNTIME_ASSERT(!key.empty() && !data.empty());
+            const size_t encrypted_len = aes_gcm_encrypt_get_length(data);
+            std::vector<unsigned char> cyphertext(encrypted_len);
+            GDK_RUNTIME_ASSERT(aes_gcm_encrypt(key, data, cyphertext) == encrypted_len);
+
             std::ofstream f(path, f.out | f.binary);
             if (f.is_open()) {
-                const size_t encrypted_len = aes_gcm_encrypt_get_length(data);
-                std::vector<unsigned char> cyphertext(encrypted_len);
-                GDK_RUNTIME_ASSERT(aes_gcm_encrypt(key, data, cyphertext) == encrypted_len);
-
                 for (size_t written = 0; written != encrypted_len; written = f.tellp()) {
                     auto p = reinterpret_cast<const char*>(&cyphertext[written]);
                     f.write(p, encrypted_len - written);
@@ -231,6 +249,13 @@ namespace sdk {
             GDK_RUNTIME_ASSERT(sqlite3_step(stmt.get()) == SQLITE_DONE);
         }
 
+        static void exec_sql(cache::sqlite3_ptr& db, const char* sql)
+        {
+            auto stmt = get_stmt(true, db, sql);
+            const auto _{ stmt_clean(stmt) };
+            step_final(stmt);
+        }
+
         static uint32_t get_uint32(cache::sqlite3_stmt_ptr& stmt, int column)
         {
             const auto val = sqlite3_column_int64(stmt.get(), column);
@@ -321,6 +346,22 @@ namespace sdk {
             return static_cast<uint64_t>(db_timestamp);
         }
 
+        static uint32_t get_scriptpubkey_pointer(cache::sqlite3_stmt_ptr& stmt)
+        {
+            const int rc = sqlite3_step(stmt.get());
+            if (rc == SQLITE_DONE) {
+                return 0; // No scriptpubkey found
+            }
+            GDK_RUNTIME_ASSERT(rc == SQLITE_ROW);
+            if (sqlite3_column_type(stmt.get(), 0) == SQLITE_NULL) {
+                return 0; // No scriptpubkey found (from e.g. MAX())
+            }
+            const uint32_t db_pointer = get_uint32(stmt, 0);
+            GDK_RUNTIME_ASSERT(db_pointer > 0);
+            step_final(stmt);
+            return db_pointer;
+        }
+
         static void bind_blob(cache::sqlite3_stmt_ptr& stmt, int column, byte_span_t blob)
         {
             if (sqlite3_bind_blob(stmt.get(), column, blob.data(), blob.size(), SQLITE_STATIC) != SQLITE_OK) {
@@ -337,27 +378,30 @@ namespace sdk {
             }
         }
 
-        static void bind_liquid_blinding(cache::sqlite3_stmt_ptr& stmt, byte_span_t pubkey, byte_span_t script)
+        static void bind_blobs(cache::sqlite3_stmt_ptr& stmt, byte_span_t blob1, byte_span_t blob2)
         {
-            bind_blob(stmt, 1, pubkey);
-            bind_blob(stmt, 2, script);
+            bind_blob(stmt, 1, blob1);
+            bind_blob(stmt, 2, blob2);
         }
     } // namespace
 
     cache::cache(const network_parameters& net_params, const std::string& network_name)
         : m_network_name(network_name)
-        , m_net_params(net_params)
+        , m_data_dir(gdk_config().at("datadir"))
         , m_is_liquid(net_params.is_liquid())
         , m_type(0)
-        , m_data_dir()
         , m_db_name()
         , m_encryption_key()
         , m_require_write(false)
         , m_db(get_db())
+        , m_stmt_liquid_blinding_key_search(
+              get_stmt(m_is_liquid, m_db, "SELECT pubkey FROM LiquidBlindingPubKey WHERE script = ?1;"))
+        , m_stmt_liquid_blinding_key_insert(get_stmt(
+              m_is_liquid, m_db, "INSERT OR IGNORE INTO LiquidBlindingPubKey (script, pubkey) VALUES (?1, ?2);"))
         , m_stmt_liquid_blinding_nonce_search(
               get_stmt(m_is_liquid, m_db, "SELECT nonce FROM LiquidBlindingNonce WHERE pubkey = ?1 AND script = ?2;"))
-        , m_stmt_liquid_blinding_nonce_insert(get_stmt(
-              m_is_liquid, m_db, "INSERT INTO LiquidBlindingNonce (pubkey, script, nonce) VALUES (?1, ?2, ?3);"))
+        , m_stmt_liquid_blinding_nonce_insert(get_stmt(m_is_liquid, m_db,
+              "INSERT OR IGNORE INTO LiquidBlindingNonce (pubkey, script, nonce) VALUES (?1, ?2, ?3);"))
         , m_stmt_liquid_output_search(get_stmt(
               m_is_liquid, m_db, "SELECT assetid, satoshi, abf, vbf FROM LiquidOutput WHERE txid = ?1 AND vout = ?2;"))
         , m_stmt_liquid_output_insert(get_stmt(m_is_liquid, m_db,
@@ -376,12 +420,26 @@ namespace sdk {
         , m_stmt_tx_delete_all(get_stmt(true, m_db, TX_DELETE_ALL))
         , m_stmt_txdata_insert(get_stmt(true, m_db, TXDATA_INSERT))
         , m_stmt_txdata_search(get_stmt(true, m_db, TXDATA_SELECT))
+        , m_stmt_scriptpubkey_search(get_stmt(true, m_db,
+              "SELECT subaccount, branch, pointer, subtype, script_type FROM ScriptPubKey WHERE scriptpubkey = ?1;"))
+        , m_stmt_scriptpubkey_insert(get_stmt(true, m_db,
+              "INSERT OR IGNORE INTO ScriptPubKey (scriptpubkey, subaccount, branch, pointer, subtype, script_type) "
+              "VALUES (?1, ?2, ?3, ?4, ?5, ?6);"))
+        , m_stmt_scriptpubkey_latest_search(
+              get_stmt(true, m_db, "SELECT MAX(pointer) FROM ScriptPubKey WHERE subaccount = ?1;"))
     {
     }
 
     cache::~cache() {}
 
     const std::string& cache::get_network_name() const { return m_network_name; }
+
+    bool cache::check_db_changed()
+    {
+        const bool changed = sqlite3_changes(m_db.get()) != 0;
+        m_require_write |= changed;
+        return changed;
+    }
 
     void cache::save_db()
     {
@@ -400,20 +458,14 @@ namespace sdk {
         m_require_write = false;
     }
 
-    void cache::load_db(byte_span_t encryption_key, const uint32_t type)
+    void cache::load_db(byte_span_t encryption_key, std::shared_ptr<signer> signer)
     {
         GDK_RUNTIME_ASSERT(!encryption_key.empty());
 
-        m_data_dir = gdk_config().value("datadir", std::string{});
-        if (m_data_dir.empty()) {
-            GDK_LOG_SEV(log_level::info) << "datadir not set - thus no get_persistent_storage_file available";
-            return;
-        }
-
-        m_type = type;
+        m_type = signer->is_watch_only() ? CT_WO : signer->is_hardware() ? CT_HW : CT_SW;
         const auto intermediate = hmac_sha512(encryption_key, ustring_span(m_network_name));
         // Note: the line below means the file name is endian dependant
-        const auto type_span = gsl::make_span(reinterpret_cast<const unsigned char*>(&type), sizeof(m_type));
+        const auto type_span = gsl::make_span(reinterpret_cast<const unsigned char*>(&m_type), sizeof(m_type));
         m_db_name = b2h(gsl::make_span(hmac_sha512(intermediate, type_span).data(), 16));
         m_encryption_key = sha256(encryption_key);
 
@@ -440,44 +492,50 @@ namespace sdk {
                 } catch (const std::exception&) {
                     // Ignore errors; fetch blob from server or recreate instead
                 }
+            } else {
+                // Loaded DB successfully
+                if (VERSION == 1) {
+                    if (m_is_liquid && !signer->is_watch_only()) {
+                        // Remove old assets keys if present. Note we don't bother
+                        // marking dirty here, since that would force a write on every
+                        // DB load. The DB will be saved at some point during normal
+                        // wallet operation, after which these calls are no-ops.
+                        clear_key_value("index");
+                        clear_key_value("icons");
+                        clear_key_value("http_assets");
+                        clear_key_value("http_icons");
+                        clear_key_value("http_assets_modified");
+                        clear_key_value("http_icons_modified");
+                    }
+                }
             }
 
             // Clean up old versions only on initial DB creation
             clean_up_old_db(m_data_dir, m_db_name);
-        } else {
-            // Loaded DB successfully
-            if (VERSION == 1) {
-                if (m_is_liquid) {
-                    // Remove old assets keys if present. Note we don't bother
-                    // marking dirty here, since that would force a write on every
-                    // DB load. The DB will be saved at some point during normal
-                    // wallet operation, after which these two calls are no-ops.
-                    clear_key_value("index");
-                    clear_key_value("icons");
-                    const auto assets_modified = get_inbuilt_data_timestamp(m_net_params, "assets");
-                    const auto icons_modified = get_inbuilt_data_timestamp(m_net_params, "icons");
-                    bool clean = false;
-                    get_key_value("http_assets_modified", { [&clean, &assets_modified](const auto& db_blob) {
-                        clean |= !db_blob || !std::equal(db_blob->begin(), db_blob->end(), assets_modified.begin());
-                    } });
-                    if (!clean) {
-                        get_key_value("http_icons_modified", { [&clean, &icons_modified](const auto& db_blob) {
-                            clean |= !db_blob || !std::equal(db_blob->begin(), db_blob->end(), icons_modified.begin());
-                        } });
-                    }
-                    if (clean) {
-                        // Our compiled-in assets have changed, nuke our diff data.
-                        GDK_LOG_SEV(log_level::info) << "Deleting cached http data";
-                        clear_key_value("http_assets");
-                        upsert_key_value("http_assets_modified", ustring_span(assets_modified));
-                        clear_key_value("http_icons");
-                        upsert_key_value("http_icons_modified", ustring_span(icons_modified));
-                        // Force this change to be written, it will not be
-                        // required again until the next gdk upgrade.
-                        m_require_write = true;
-                    }
-                }
+        }
+    }
+
+    void cache::update_to_latest_minor_version()
+    {
+        uint32_t ver = 0;
+        get_key_value("minor_version", { [&ver](const auto& db_blob) {
+            if (db_blob) {
+                ver = (db_blob->at(0) << 8) | db_blob->at(1);
             }
+        } });
+        if (ver < MINOR_VERSION) {
+            // Delete cache items that can be re-populated as the latest minor version
+            GDK_LOG_SEV(log_level::info) << "Updating tx cache version " << ver << " to v" << MINOR_VERSION;
+            if (m_is_liquid && ver < 1) {
+                // Delete pre-v1 tx and blinding data
+                exec_sql(m_db, "DELETE FROM LiquidOutput;");
+                exec_sql(m_db, "DELETE FROM LiquidBlindingNonce;");
+                exec_sql(m_db, "DELETE FROM Tx;");
+            }
+
+            const std::array<unsigned char, 2> new_ver = { 0x00, MINOR_VERSION };
+            upsert_key_value("minor_version", new_ver); // Mark updated to latest minor
+            m_require_write = true;
         }
     }
 
@@ -488,7 +546,7 @@ namespace sdk {
         const auto key_span = ustring_span(key);
         bind_blob(m_stmt_key_value_delete, 1, key_span);
         step_final(m_stmt_key_value_delete);
-        m_require_write = true;
+        check_db_changed();
     }
 
     void cache::get_key_value(const std::string& key, const cache::get_key_value_fn& callback)
@@ -542,7 +600,7 @@ namespace sdk {
         bind_blob(m_stmt_txdata_insert, 1, txid);
         bind_blob(m_stmt_txdata_insert, 2, value);
         step_final(m_stmt_txdata_insert);
-        m_require_write = true;
+        check_db_changed();
     }
 
     uint64_t cache::get_latest_transaction_timestamp(uint32_t subaccount)
@@ -594,7 +652,7 @@ namespace sdk {
         bind_int(m_stmt_tx_spv_update, 1, 1); // SPV_STATUS_VERIFIED
         bind_blob(m_stmt_tx_spv_update, 2, txid);
         step_final(m_stmt_tx_spv_update);
-        m_require_write = true;
+        check_db_changed();
     }
 
     void cache::delete_transactions(uint32_t subaccount, uint64_t start_ts)
@@ -603,7 +661,7 @@ namespace sdk {
         bind_int(m_stmt_tx_delete_all, 1, subaccount);
         bind_int(m_stmt_tx_delete_all, 2, start_ts);
         step_final(m_stmt_tx_delete_all);
-        m_require_write = true;
+        check_db_changed();
     }
 
     bool cache::delete_mempool_txs(uint32_t subaccount)
@@ -659,7 +717,7 @@ namespace sdk {
             delete_block_txs(subaccount, existing_tx_block);
             // Fall through to delete mempool txs
         }
-        // Otherwise, we havent seen this tx yet, or we've been re-notified of a mempool tx.
+        // Otherwise, we haven't seen this tx yet, or we've been re-notified of a mempool tx.
         // Remove any mempool txs this tx could be double spending/replacing
         delete_mempool_txs(subaccount);
     }
@@ -669,8 +727,17 @@ namespace sdk {
         GDK_RUNTIME_ASSERT(!pubkey.empty() && !script.empty());
         GDK_RUNTIME_ASSERT(m_stmt_liquid_blinding_nonce_search.get());
         const auto _{ stmt_clean(m_stmt_liquid_blinding_nonce_search) };
-        bind_liquid_blinding(m_stmt_liquid_blinding_nonce_search, pubkey, script);
+        bind_blobs(m_stmt_liquid_blinding_nonce_search, pubkey, script);
         return get_blob(m_stmt_liquid_blinding_nonce_search, 0);
+    }
+
+    std::vector<unsigned char> cache::get_liquid_blinding_pubkey(byte_span_t script)
+    {
+        GDK_RUNTIME_ASSERT(!script.empty());
+        GDK_RUNTIME_ASSERT(m_stmt_liquid_blinding_key_search.get());
+        const auto _{ stmt_clean(m_stmt_liquid_blinding_key_search) };
+        bind_blob(m_stmt_liquid_blinding_key_search, 1, script);
+        return get_blob(m_stmt_liquid_blinding_key_search, 0);
     }
 
     nlohmann::json cache::get_liquid_output(byte_span_t txhash, const uint32_t vout)
@@ -713,18 +780,28 @@ namespace sdk {
         bind_blob(m_stmt_key_value_upsert, 1, key_span);
         bind_blob(m_stmt_key_value_upsert, 2, value);
         step_final(m_stmt_key_value_upsert);
-        m_require_write = true;
+        check_db_changed();
     }
 
-    void cache::insert_liquid_blinding_nonce(byte_span_t pubkey, byte_span_t script, byte_span_t nonce)
+    bool cache::insert_liquid_blinding_data(
+        byte_span_t pubkey, byte_span_t script, byte_span_t nonce, byte_span_t blinding_pubkey)
     {
         GDK_RUNTIME_ASSERT(!pubkey.empty() && !script.empty() && !nonce.empty());
-        GDK_RUNTIME_ASSERT(m_stmt_liquid_blinding_nonce_insert.get());
-        const auto _{ stmt_clean(m_stmt_liquid_blinding_nonce_insert) };
-        bind_liquid_blinding(m_stmt_liquid_blinding_nonce_insert, pubkey, script);
-        bind_blob(m_stmt_liquid_blinding_nonce_insert, 3, nonce);
-        step_final(m_stmt_liquid_blinding_nonce_insert);
-        m_require_write = true;
+        {
+            GDK_RUNTIME_ASSERT(m_stmt_liquid_blinding_nonce_insert.get());
+            const auto _{ stmt_clean(m_stmt_liquid_blinding_nonce_insert) };
+            bind_blobs(m_stmt_liquid_blinding_nonce_insert, pubkey, script);
+            bind_blob(m_stmt_liquid_blinding_nonce_insert, 3, nonce);
+            step_final(m_stmt_liquid_blinding_nonce_insert);
+        }
+        const bool changed = check_db_changed();
+        {
+            GDK_RUNTIME_ASSERT(m_stmt_liquid_blinding_key_insert.get());
+            const auto _{ stmt_clean(m_stmt_liquid_blinding_key_insert) };
+            bind_blobs(m_stmt_liquid_blinding_key_insert, script, blinding_pubkey);
+            step_final(m_stmt_liquid_blinding_key_insert);
+        }
+        return changed | check_db_changed();
     }
 
     void cache::insert_liquid_output(byte_span_t txhash, uint32_t vout, nlohmann::json& utxo)
@@ -749,6 +826,56 @@ namespace sdk {
 
         step_final(m_stmt_liquid_output_insert);
         m_require_write = true;
+    }
+
+    void cache::insert_scriptpubkey_data(byte_span_t scriptpubkey, uint32_t subaccount, uint32_t branch,
+        uint32_t pointer, uint32_t subtype, uint32_t script_type)
+    {
+        GDK_RUNTIME_ASSERT(!scriptpubkey.empty());
+        GDK_RUNTIME_ASSERT(pointer > 0);
+        GDK_RUNTIME_ASSERT(m_stmt_scriptpubkey_insert.get());
+        const auto _{ stmt_clean(m_stmt_scriptpubkey_insert) };
+
+        bind_blob(m_stmt_scriptpubkey_insert, 1, scriptpubkey);
+
+        bind_int(m_stmt_scriptpubkey_insert, 2, subaccount);
+        bind_int(m_stmt_scriptpubkey_insert, 3, branch);
+        bind_int(m_stmt_scriptpubkey_insert, 4, pointer);
+        bind_int(m_stmt_scriptpubkey_insert, 5, subtype);
+        bind_int(m_stmt_scriptpubkey_insert, 6, script_type);
+
+        step_final(m_stmt_scriptpubkey_insert);
+        m_require_write = true;
+    }
+
+    nlohmann::json cache::get_scriptpubkey_data(byte_span_t scriptpubkey)
+    {
+        nlohmann::json utxo;
+
+        GDK_RUNTIME_ASSERT(!scriptpubkey.empty());
+        GDK_RUNTIME_ASSERT(m_stmt_scriptpubkey_search.get());
+        const auto _{ stmt_clean(m_stmt_scriptpubkey_search) };
+        bind_blob(m_stmt_scriptpubkey_search, 1, scriptpubkey);
+        const int rc = sqlite3_step(m_stmt_scriptpubkey_search.get());
+        if (rc == SQLITE_DONE) {
+            return utxo;
+        }
+        GDK_RUNTIME_ASSERT(rc == SQLITE_ROW);
+        utxo["subaccount"] = get_uint32(m_stmt_scriptpubkey_search, 0);
+        utxo["branch"] = get_uint32(m_stmt_scriptpubkey_search, 1);
+        utxo["pointer"] = get_uint32(m_stmt_scriptpubkey_search, 2);
+        utxo["subtype"] = get_uint32(m_stmt_scriptpubkey_search, 3);
+        utxo["script_type"] = get_uint32(m_stmt_scriptpubkey_search, 4);
+
+        step_final(m_stmt_scriptpubkey_search);
+        return utxo;
+    }
+
+    uint32_t cache::get_latest_scriptpubkey_pointer(uint32_t subaccount)
+    {
+        const auto _{ stmt_clean(m_stmt_scriptpubkey_latest_search) };
+        bind_int(m_stmt_scriptpubkey_latest_search, 1, subaccount);
+        return get_scriptpubkey_pointer(m_stmt_scriptpubkey_latest_search);
     }
 } // namespace sdk
 } // namespace ga

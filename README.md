@@ -1,20 +1,17 @@
-# GreenAddress C/C++ SDK
+# Green C/C++ SDK
 
 GDK is a cross-platform, cross-language library for Blockstream Green wallets.
 
 Read the API documentation at https://gdk.readthedocs.io/en/latest/
 
-[![Build Status](https://travis-ci.org/Blockstream/gdk.svg?branch=master)](https://travis-ci.org/Blockstream/gdk)
-
 ## Meson/Ninja build:
 
 ### Build dependencies:
 
-For Debian Stretch:
+For Debian Bullseye:
 
 ```
-sudo apt update && sudo apt install build-essential python3-pip ninja-build clang wget autoconf pkg-config libtool swig (optional)
-sudo pip3 install -r tools/requirements.txt or pip3 install --user -r tools/requirements.txt
+sudo ./tools/bullseye_deps.sh
 ```
 
 For Mac OSX:
@@ -22,21 +19,21 @@ For Mac OSX:
 Install Xcode and brew if not installed, then
 
 ```
-brew update && brew install ninja automake autoconf libtool gnu-sed python3 wget pkg-config swig (optional) gnu-getopt gnu-tar
+brew update && brew install ninja automake autoconf libtool gnu-sed python3 pkg-config swig (optional) gnu-getopt gnu-tar
 pip3 install --user meson
 xcode-select --install
 ```
 
-Install rust dependencies (Optional):
+Install rust dependencies:
 
   1. Install rustup: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 
-  2. Install default rust toolchain: `rustup install 1.49.0`
+  2. Install default rust toolchain: `rustup install 1.56.0`
 
   3. Install additional rust targets: `rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android x86_64-pc-windows-gnu aarch64-apple-ios
 x86_64-apple-ios`
 
-You may also need to change your PATH environment variable to add `$HOME/Library/Python/3.6/bin`
+You may also need to change your PATH environment variable to add `$HOME/Library/Python/3.X/bin`
 
 If you want to target Android you will need to download the NDK and set the ANDROID_NDK env variable to the directory you uncompress it to, for example
 
@@ -44,7 +41,7 @@ If you want to target Android you will need to download the NDK and set the ANDR
 
 or you can add it to your bash profile `~/.bash_profile`
 
-JAVA bindings can be built by installing swig as explained above and setting JAVA_HOME to the location of the JDK.
+Java bindings can be built by installing swig as explained above and setting JAVA_HOME to the location of the JDK.
 
 ### To build:
 
@@ -102,16 +99,11 @@ or
 
 for a debug optimized build.
 
-#### Rust-Electrum support
-
-Pass `--enable-rust` to build the rust-electrum single signature support as used
-by e.g. [Aqua](https://github.com/Blockstream/aqua_ios).
-
 #### Disable LTO
 
 By default builds use link time optimisation. It can be disabled when invoking build.sh. For example
 
-`tools/build.sh --lto=false --clang`
+`tools/build.sh --clang`
 
 #### Clang Analyzer
 
@@ -149,11 +141,11 @@ which allows for multiple side by side installs of compilers in common linux dis
 
 Use clang-5.0, no LTO, enable clang-tidy and debug build
 
-`./tools/build.sh --compiler-version=5.0 --buildtype=debug --lto=false --clang-tidy-version=5.0 --clang`
+`./tools/build.sh --compiler-version=5.0 --buildtype=debug --clang-tidy-version=5.0 --clang`
 
 Use address sanitizer with gcc-7, no LTO, enable clang-tidy and debug build
 
-`./tools/build.sh --compiler-version=7 --buildtype=debug --lto=false --sanitizer=address --clang-tidy-version=5.0 --gcc`
+`./tools/build.sh --compiler-version=7 --buildtype=debug --sanitizer=address --clang-tidy-version=5.0 --gcc`
 
 Use clang-analyzer (it'll analyze GDK and its direct dependencies)
 
@@ -173,7 +165,7 @@ If JAVA_HOME is set while the library is built, a Java wrapper is built exposing
 
 Similarly, if `--python-version` is passed to `tools/build.sh` a Python wrapper is built, for example:
 
-`./tools/build.sh --install $PWD --gcc --python-version 3.7`
+`./tools/build.sh --install $PWD --gcc --python-version 3.9`
 
 ### Swift wrapper
 

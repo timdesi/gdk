@@ -13,12 +13,24 @@ Passed to `GA_init` when initializing the library.
 .. code-block:: json
 
     {
-        "datadir": "/path/to/datadir"
+        "datadir": "/path/to/store/data"
+        "tordir": "/path/to/store/tor/data"
+        "registrydir": "/path/to/store/registry/data"
+        "log_level": "info",
     }
 
-:datadir: An optional directory which the gdk will use to store encrypted data
-         relating to sessions. If omitted no local storage will be used, note
-         that this may significantly decrease the performance of some calls.
+:datadir: Mandatory. A directory which gdk will use to store encrypted data
+          relating to sessions.
+:tordir: An optional directory for tor state data, used when the internal tor
+         implementation is enabled in :ref:`net-params`. Note that each process
+         using the library at the same time requires its own distinct directory.
+         If not given, a subdirectory ``"tor"`` inside ``"datadir"`` is used.
+:registrydir: An optional directory for the registry data, used when the network
+         is liquid based. Note that each process using the library at the same
+         time requires its own distinct directory.
+         If not given, a subdirectory ``"registry"`` inside ``"datadir"`` is used.
+:log_level: Library logging level, one of ``"debug"``, ``"info"``, ``"warn"``,
+           ``"error"``, or ``"none"``.
 
 .. _net-params:
 
@@ -29,19 +41,43 @@ Connection parameters JSON
 
    {
       "name": "testnet",
-      "log_level": "info",
       "proxy": "localhost:9150",
       "use_tor": true,
       "user_agent": "green_android v2.33",
       "spv_enabled": false,
-      "cert_expiry_threshold": 1,
+      "cert_expiry_threshold": 1
    }
 
-:cert_expiry_threshold: Reject/ignore certificates expiring within this many days
-                        from today. This is useful for pre-empting problems with
-                        expiring embedded certificates.
+:name: The name of the network to connect to. Must match a key from :ref:`networks-list`.
+:proxy: The proxy connection to pass network traffic through, if any.
+:use_tor: ``true`` to enable Tor connections, ``false`` otherwise. If enabled
+          and a proxy is not given, a Tor connection will be started internally.
+          If a proxy is given and Tor is enabled, the proxy must support
+          resolving ``".onion"`` domains.
+:user_agent: The user agent string to pass to the server for multisig connections.
+:spv_enabled: ``true`` to enable SPV verification for the session, ``false`` otherwise.
+:cert_expiry_threshold: Ignore certificates expiring within this many days from today. Used to pre-empt problems with expiring embedded certificates.
 
-.. _login-credentials:
+
+ .. _proxy-info:
+
+Proxy Settings JSON
+-------------------
+
+Contains the proxy settings in use by a session.
+
+.. code-block:: json
+
+   {
+      "proxy": "localhost:9150",
+      "use_tor": true
+   }
+
+:proxy: The proxy connection being used to pass network traffic through, or an empty string.
+:use_tor: ``true`` if Tor is enabled, ``false`` otherwise.
+
+
+ .. _login-credentials:
 
 Login credentials JSON
 ----------------------
@@ -55,6 +91,15 @@ To authenticate with a mnemonic and optional password:
    {
       "mnemonic": "moral lonely ability sail balance simple kid girl inhale master dismiss round about aerobic purpose shiver silly happy kitten track kind pattern nose noise",
       "password": ""
+   }
+
+Or, with a mnemonic and optional BIP39 passphrase:
+
+.. code-block:: json
+
+   {
+      "mnemonic": "moral lonely ability sail balance simple kid girl inhale master dismiss round about aerobic purpose shiver silly happy kitten track kind pattern nose noise",
+      "bip39_passphrase": ""
    }
 
 To authenticate with a PIN:
@@ -117,7 +162,7 @@ The default for any value not provided is false or 0.
 PIN data JSON
 -------------
 
-Contains the data returned by `GA_set_pin`. The caller must persist this
+Contains the data returned by `GA_encrypt_with_pin`. The caller must persist this
 data and pass it to `GA_login_user` along with the users PIN in order to
 allow a PIN login.
 
@@ -128,6 +173,36 @@ allow a PIN login.
       "pin_identifier": "38e2f188-b3a8-4d98-a7f9-6c348cb54cfe",
       "salt": "a99/9Qy6P7ON4Umk2FafVQ=="
    }
+
+
+.. _encrypt-with-pin-details:
+
+Encrypt with PIN JSON
+---------------------
+
+.. code-block:: json
+
+   {
+      "pin": "...",
+      "plaintext": {}
+   }
+
+:pin: The PIN to protect the server provided key.
+:plaintext: The json to encrypt. For instance it can be the :ref:`login-credentials` with the mnemonic.
+
+
+.. _encrypt-with-pin-result:
+
+Encrypt with PIN Result JSON
+----------------------------
+
+.. code-block:: json
+
+   {
+      "pin_data": "...",
+   }
+
+:pin_data: See :ref:`pin-data`.
 
 
 .. _wallet-id-request:
@@ -147,6 +222,20 @@ otherwise, pass the wallets master xpub as follows:
    }
 
 :master_xpub: The base58-encoded BIP32 extended master public key of the wallet.
+
+
+ .. _get-credentials-details:
+
+Get credentials JSON
+----------------------
+
+Accepts an optional password to encrypt the mnemonic.
+
+.. code-block:: json
+
+   {
+      "password": ""
+   }
 
 
 .. _subaccount-detail:
@@ -169,6 +258,7 @@ as the array elements of `GA_get_subaccounts`.
     "recovery_xpub": "",
     "required_ca": 0,
     "type": "2of2"
+    "bip44_discovered": false
   }
 
 :hidden: Whether the subaccount is hidden.
@@ -182,7 +272,7 @@ as the array elements of `GA_get_subaccounts`.
     that the user must upload to the server before transacting.
 :type: For multisig subaccounts, one of ``"2of2"``, ``"2of3"`` or ``"2of2_no_recovery"``.
     For singlesig subaccounts, one of ``"p2pkh"``, ``"p2wpkh"`` or ``"p2sh-p2wpkh"``.
-
+:bip44_discovered: Singlesig only. Whether or not this subaccount contains at least one transaction.
 
 .. _subaccount-update:
 
@@ -611,37 +701,85 @@ Send transaction JSON
 
 
 
-.. _create-pset-details:
+.. _sign-psbt-details:
 
-Create PSET JSON
------------------------
+Sign PSBT JSON
+--------------
 
 .. code-block:: json
 
- {
-   "send_asset": "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d",
-   "send_amount": 10000,
-   "recv_asset": "ce091c998b83c78bb71a632313ba3760f1763d9cfcffae02258ffa9865a37bd2",
-   "recvAmount": 500000000
- }
+  {
+    "psbt": "...",
+    "utxos": [],
+    "blinding_nonces": [],
+  }
+
+:psbt: The PSBT or PSET encoded in base64 format.
+:utxos: The UTXOs that should be signed, in the format returned by `GA_get_unspent_outputs`.
+        UTXOs that are not inputs of the PSBT/PSET can be included.
+        Caller can avoid signing an input by not passing in its UTXO.
+:blinding_nonces: For ``"2of2_no_recovery"`` subaccounts only, the blinding nonces in hex format for all outputs.
 
 
+.. _sign-psbt-result:
 
-.. _sign-pset-details:
-
-Sign PSET JSON
+Sign PSBT Result JSON
 ---------------------
 
 .. code-block:: json
 
- {
-   "pset": "AABBCC..",
-   "send_asset": "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d",
-   "send_amount": 10000,
-   "recv_asset": "ce091c998b83c78bb71a632313ba3760f1763d9cfcffae02258ffa9865a37bd2",
-   "recvAmount": 500000000
- }
+  {
+    "psbt": "...",
+    "utxos": [],
+  }
 
+:psbt: The input PSBT or PSET in base64 format, with signatures added for all inputs signed.
+:utxos: The UTXOs corresponding to each signed input, in the order they appear in the PSBT transaction.
+
+
+
+.. _psbt-wallet-details:
+
+PSBT Get Details JSON
+---------------------
+
+.. code-block:: json
+
+  {
+    "psbt": "...",
+    "utxos": [],
+  }
+
+:psbt: The PSBT or PSET encoded in base64 format.
+:utxos: The UTXOs owned by the wallet, in the format returned by `GA_get_unspent_outputs`.
+        UTXOs that are not inputs of the PSBT/PSET can be included.
+
+
+.. _psbt-get-details-result:
+
+PSBT Get Details Result JSON
+----------------------------
+
+.. code-block:: json
+
+  {
+    "inputs": [
+      {
+        "asset_id": "...",
+        "satoshi": 0,
+        "subaccount": 0,
+      },
+    ],
+    "outputs": [
+      {
+        "asset_id": "...",
+        "satoshi": 0,
+        "subaccount": 0,
+      },
+    ],
+  }
+
+.. note:: Inputs and outputs might have additional fields that might be removed or changed in following releases.
 
 
 .. _estimates:
@@ -759,12 +897,36 @@ Receive address details JSON
     "script": "52210338832debc5e15ce143d5cf9241147ac0019e7516d3d9569e04b0e18f3278718921025dfaa85d64963252604e1b139b40182bb859a9e2e1aa2904876c34e82158d85452ae",
     "script_type": 14,
     "subaccount": 0,
-    "subtype": null
+    "subtype": 0
+    "user_path": [1, 13]
   }
 
-:subaccount: The value of "pointer" from :ref:`subaccount-list` or :ref:`subaccount-detail` for the subaccount to generate an address for. Default 0.
-:address_type: One of "csv", "p2sh", "p2wsh". Default value depends on wallet settings.
+:address: The wallet address in base58, bech32 or blech32 encoding.
+:address_type: One of ``"csv"``, ``"p2sh"``, ``"p2wsh"`` (multisig),
+    or ``"p2pkh"``, ``"p2sh-p2wpkh"``, ``"p2wpkh"`` (singlesig), indicating the type of address.
+:branch: Always ``1``, used in the address derivation path for subaccounts.
+:pointer: The address number/final number in the address derivation path.
+:script: The scriptpubkey of the address.
+:script_type: Integer representing the type of script.
+:subaccount: The subaccount this address belongs to. Matches ``"pointer"`` from :ref:`subaccount-list` or :ref:`subaccount-detail`.
+:subtype: For ``"address_type"`` ``"csv"``, the number of CSV blocks referenced in ``"script"``, otherwise, 0.
+:user_path: The BIP32 path for the user key.
 
+For Liquid addresses, the following additional fields are returned:
+
+.. code-block:: json
+
+  {
+    "blinding_key": "02a519491b130082a1abbe17395213b46dae43c3e1c05b7a3dbd2157bd83e88a6e",
+    "blinding_script": "a914c2427b28b2796243e1e8ee65be7598d465264b0187",
+    "is_blinded": true,
+    "unblinded_address": "XV4PaYgbaJdPnYaJDzE41TpbBF6yBieeyd"
+  }
+
+:blinding_key: The blinding key used to blind this address.
+:blinding_script: The script used to generate the blinding key via https://github.com/satoshilabs/slips/blob/master/slip-0077.md.
+:is_blinded: Always ``true``.
+:unblinded_address: The unblinded address. This is provided for informational purposes only and should not be used to receive.
 
 
 .. _previous-addresses-request:
@@ -782,10 +944,11 @@ Contains the query parameters for requesting previously generated addresses usin
   }
 
 :subaccount: The value of "pointer" from :ref:`subaccount-list` or :ref:`subaccount-detail` for the subaccount to fetch addresses for. Default 0.
-:last_pointer: The address pointer from which results should be returned. Passing 0 (the default) returns
-               the newest generated addresses. The "last_pointer" value from the resulting :ref:`previous-addresses`
-               should then be given, until sufficient pages have been fetched or the "last_pointer" value
-               is 1 indicating all addresses have been fetched.
+:last_pointer: The address pointer from which results should be returned. If this key is not present, the
+               newest generated addresses are returned. If present, the "last_pointer" value from the
+               resulting :ref:`previous-addresses` should then be given, until sufficient pages have been
+               fetched or the "last_pointer" key is not present indicating all addresses have been fetched.
+:is_internal: Singlesig only. Whether or not the user key belongs to the internal chain.
 
 
 
@@ -799,39 +962,48 @@ Contains a page of previously generated addresses, from newest to oldest.
 .. code-block:: json
 
   {
-    "last_pointer": 1,
+    "last_pointer": 2,
     "list": [
       {
         "address": "2N52RVsChsCi439PpJ1Hn8fHCiTrRjcAEiL",
         "address_type": "csv",
         "branch": 1,
+        "is_internal": false,
         "pointer": 2,
         "script": "2102df992d7fa8f012d61048349e366f710aa0168a1c08606d7bebb65f980ccf2616ad2102a503dfc70ad1f1a510f7e3c79ffeebc608f27c6670edfb7b420bd32fdb044b73ac73640380ca00b268",
         "script_type": 15,
         "subaccount": 0,
         "subtype": 51840,
-        "tx_count": 0
+        "tx_count": 0,
+        "user_path": [
+          1,
+          2
+        ],
       },
       {
         "address": "2MzyxeSfodsJkj4YYAyyNpGwqpvdze7qLSf",
         "address_type": "csv",
         "branch": 1,
+        "is_internal": false,
         "pointer": 1,
         "script": "2102815c7ba597b1e0f08357ddb346dab3952b2a76e189efc9ebde51ec005df0b41cad210328154df2714de6b15e740330b3509ce26bc0a3e21bf77ce0eaefeea0e9e77b59ac73640380ca00b268",
         "script_type": 15,
         "subaccount": 0,
         "subtype": 51840,
-        "tx_count": 0
+        "tx_count": 0,
+        "user_path": [
+          1,
+          1
+        ],
       }
     ],
-    "subaccount": 0
   }
 
-:last_pointer: Contains the next_pointer value to pass in :ref:`previous-addresses-request` in a
-               subsequent call to `GA_get_previous_addresses` in order to fetch the next page.
-               Will be 1 when all addresses have been fetched.
+:last_pointer: If present indicates that there are more addresses to be fetched, and the caller
+               to get the next page should call again `GA_get_previous_addresses` passing this
+               value in :ref:`previous-addresses-request`.
+               If not present there are no more addresses to fetch.
 :list: Contains the current page of addresses in :ref:`receive-address-details` format.
-:subaccount: The subaccount which the generated addresses belong to.
 
 
 
@@ -861,6 +1033,89 @@ or which unspent outputs to include in the balance returned by `GA_get_balance`.
     by the given block are returned.
 :confidential: Pass ``true`` to include only confidential UTXOs. Defaults to ``false``.
 :dust_limit: If given, only UTXOs with a value greater than the limit value are returned.
+
+
+.. _unspent-outputs:
+
+Unspent outputs JSON
+--------------------
+
+Contains the filtered unspent outputs.
+
+.. code-block:: json
+
+  {
+    "unspent_outputs": {
+      "btc": [
+        {
+          "txhash": "09933a297fde31e6477d5aab75f164e0d3864e4f23c3afd795d9121a296513c0",
+          "pt_idx": 0,
+          "satoshi": 10000,
+          "block_height": 1448369,
+          "address_type": "p2wsh",
+          "is_internal": false,
+          "pointer": 474,
+          "subaccount": 0,
+          "prevout_script": "522102ff54a17dc6efe168673dbf679fe97e06b5cdcaf7dea8ab83dc6732350cd1b4e4210279979574e0743b4659093c005256c812f68f512c50d7d1622650b891de2cd61e52ae",
+          "user_path": [
+            1,
+            474
+          ],
+          "public_key": "0279979574e0743b4659093c005256c812f68f512c50d7d1622650b891de2cd61e",
+          "expiry_height": 1458369,
+          "script_type": 14,
+          "user_status": 0,
+          "subtype": 0,
+        },
+      ],
+    }
+  }
+
+:txhash: The txid of the transaction.
+:pt_idx: The index of the output, the vout.
+:satoshi: The amount of the output.
+:block_height: The height of the block where the transaction is included.
+               Is 0 if the transaction is unconfirmed.
+:address_type: One of ``"csv"``, ``"p2sh"``, ``"p2wsh"`` (multisig),
+    or ``"p2pkh"``, ``"p2sh-p2wpkh"``, ``"p2wpkh"`` (singlesig), indicating the type of address.
+:is_internal: Whether or not the user key belongs to the internal chain.
+:pointer: The user key number/final number in the derivation path.
+:subaccount: The subaccount this output belongs to.
+             Matches ``"pointer"`` from :ref:`subaccount-list` or :ref:`subaccount-detail`.
+:prevout_script: The script being signed, the script code.
+:user_path: The BIP32 path for the user key.
+:public_key: Singlesig only. The user public key.
+:expiry_height: Multisig only.
+                The block height when two-factor authentication expires.
+:script_type: Multisig only. Integer representing the type of script.
+:user_status: Multisig only. 0 for ``"default"`` and 1 for ``"frozen"``.
+:subtype: Multisig only. For ``"address_type"`` ``"csv"``,
+          the number of CSV blocks referenced in ``"script"``, otherwise, 0.
+
+For Liquid instead of having the ``"btc"`` field, there are (possibly) multiple
+fields, one for each asset owned, and the keys are the hex-encoded policy ids.
+
+For Liquid the inner maps have additional fields:
+
+.. code-block:: json
+
+  {
+    "confidential": true,
+    "asset_id": "e4b76d990f27bf6063cb66ff5bbc783d03258a0406ba8ac09abab7610d547e72",
+    "assetblinder": "aedb6c37d0ea0bc64fbc7036b52d0a0784da0b1ca90ac918c19ee1025b0c944c",
+    "amountblinder": "3be117b88ba8284b05b89998bdee1ded8cd5b561ae3d05bcd91d4e8abab2cd47",
+    "asset_tag": "0b103a2d34cf469987dd06937919f9dae8c9856be17c554fd408fdc226b1769e59",
+    "commitment": "094c3f83d5bac22b527ccac141fe04883d79bf04aef10a1dd42f501c5b51318907",
+    "nonce_commitment": "0211b39afe463473e428cfafd387f9c85b350f440131fad03aa5f4809b6c834f30",
+  }
+
+:confidential: Whether or not the output is confidential.
+:asset_id: The hex-encoded asset id.
+:assetblinder: The hex-encoded asset blinder (asset blinding factor, abf)
+:amountblinder: The hex-encoded amount blinder (value blinding factor, vbf)
+:asset_tag: The hex-encoded asset commitment.
+:commitment: The hex-encoded value commitment.
+:nonce_commitment: The hex-encoded nonce commitment.
 
 
 .. _unspent-outputs-status:
@@ -1079,28 +1334,39 @@ The data returned depends on the current state of the handler, as follows:
 :required_data: Contains the data the HWW must provide, see :ref:`hw-resolve-overview`.
 
 
-.. _hint:
+.. _reconnect:
 
-Reconnect hint JSON
--------------------
+Reconnect JSON
+--------------
 
-.. code-block:: json
-
-   { "hint" : "now" }
+Controls session and internal Tor instance reconnection behaviour.
 
 .. code-block:: json
 
-   { "hint" : "disable" }
+   {
+     "hint": "connect",
+     "tor_hint": "connect"
+   }
 
-.. code-block:: json
+:hint: Optional, must be either ``"connect"`` or ``"disconnect"`` if given.
+:tor_hint: Optional, must be either ``"connect"`` or ``"disconnect"`` if given.
 
-   { "tor_sleep_hint" : "wakeup", "hint": "start" }
+For both hint types, ``"disconnect"`` will disconnect the underlying network
+connection used by the session, while ``"connect"`` will reconnect it. if
+a hint is not given, no action will be taken for that connection type.
 
-.. code-block:: json
+Each session will automatically attempt to reconnect in the background when
+they detect a disconnection, unless ``"disconnect"`` is passed to close the
+connection first. The session will be notified using a :ref:`ntf-network` when
+the underlying network connection changes state.
 
-   { "tor_sleep_hint" : "sleep" }
-
-
+For environments such as mobile devices where networking may become
+unavailable to the callers application, the network must be disconnected
+and reconnected using `GA_reconnect_hint` in order for connectivity to
+be resumed successfully. In particular, when using the built-in Tor
+implementation to connect, failure to do so may result in Tor failing
+to connect for the remaining lifetime of the application (this is a
+Tor limitation).
 
 .. _convert-amount:
 
@@ -1177,20 +1443,6 @@ Available currencies JSON
 
 
 
-.. _session-event:
-
-Session event notification JSON
--------------------------------
-
-.. code-block:: json
-
-   {
-      "event": "session"
-      "session": {"connected": false}
-   }
-
-
-
 .. _http-params:
 
 HTTP parameters JSON
@@ -1237,6 +1489,51 @@ Asset parameters JSON
       "refresh": true
    }
 
+.. _get-assets-params:
+
+Get assets parameters JSON
+--------------------------
+
+.. code-block:: json
+
+   {
+      "assets_id": ["6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d","144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49"],
+   }
+
+
+.. _asset-informations:
+
+Asset informations JSON
+--------------------------
+
+.. code-block:: json
+
+   {
+      "assets": {
+         "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d": {
+            "asset_id": "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d",
+            "contract": null,
+            "entity": null,
+            "issuance_prevout": {
+               "txid": "0000000000000000000000000000000000000000000000000000000000000000",
+               "vout": 0
+            },
+            "issuance_txin":{
+               "txid": "0000000000000000000000000000000000000000000000000000000000000000",
+               "vin": 0
+            },
+            "issuer_pubkey": "",
+            "name": "btc",
+            "precision": 8,
+            "ticker": "L-BTC",
+            "version": 0
+         }
+      },
+      "icons": {
+         "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d": "BASE64"
+      }
+   }
+
 
 .. _error-details:
 
@@ -1248,3 +1545,18 @@ Error details JSON
    {
       "details":"assertion failure: ../src/ga_session.cpp:rename_subaccount:2166:Unknown subaccount"
    }
+
+.. _get-subaccounts-params-data:
+
+Get Subaccounts parameters JSON
+-------------------------------
+
+Parameters controlling the `GA_get_subaccounts` call.
+
+.. code-block:: json
+
+   {
+      "refresh": false
+   }
+
+:refresh: If set to ``true``, subaccounts are re-discovered if appropriate for the session type. Note that this will take significantly more time if set. Defaults to ``false``.

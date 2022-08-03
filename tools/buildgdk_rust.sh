@@ -33,17 +33,22 @@ export CC_armv7_linux_androideabi=armv7a-linux-androideabi19-clang
 export CC_aarch64_linux_android=aarch64-linux-android21-clang
 
 OUT_LIB_FILE="libgdk_rust.a"
-CARGO_FEATURES=()
 CARGO_ARGS=()
 
 cd "$BUILD_ROOT/subprojects/gdk_rust"
 
+if [ "$(uname)" = "Darwin" ]; then
+    export CARGO_PROFILE_DEV_LTO=true
+fi
+
 if [ \( "$1" = "--ndk" \) ]; then
-    CARGO_FEATURES+=("android_log")
     if [ "$(uname)" = "Darwin" ]; then
         export PATH=${PATH}:${ANDROID_NDK}/toolchains/llvm/prebuilt/darwin-x86_64/bin
+        export AR=${ANDROID_NDK}/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar
     else
         export PATH=${PATH}:${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin
+        export AR=${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+        export OBJCOPY=${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy
     fi
     if [ "$HOST_ARCH" = "armeabi-v7a" ]; then
         RUSTTARGET=armv7-linux-androideabi
@@ -65,8 +70,12 @@ elif [ \( "$1" = "--iphone" \) ]; then
 elif [ \( "$1" = "--iphonesim" \) ]; then
     RUSTTARGET=x86_64-apple-ios
     LD_ARCH="-arch x86_64 -platform_version ios-simulator 11.0 11.0"
+elif [ "$(uname)" = "Darwin" ]; then
+    SDK_CPU=$(uname -m)
+    RUSTTARGET=$HOST_OS
+    LD_ARCH="-arch $SDK_CPU -platform_version macos 10.13 10.13"
 else
-    LD_ARCH="-arch x86_64 -platform_version macos 10.13 10.13"
+    LD_ARCH="-platform_version macos 10.13 10.13"
 fi
 
 if [ "$BUILDTYPE" == "release" ]; then
@@ -77,9 +86,9 @@ if [ -n "$RUSTTARGET" ]; then
     CARGO_ARGS+=("--target=$RUSTTARGET")
 fi
 
-if [ -n "${CARGO_FEATURES[*]}" ]; then
-    CARGO_ARGS+=("--features")
-    CARGO_ARGS+=("${CARGO_FEATURES[*]}")
+if [ -n "${NUM_JOBS}" ]; then
+    CARGO_ARGS+=("--jobs")
+    CARGO_ARGS+=(${NUM_JOBS})
 fi
 
 printf "cargo args: ${CARGO_ARGS[*]}\n"

@@ -45,6 +45,7 @@ namespace sdk {
 
         virtual void request_code(const std::string& method) = 0;
         virtual void resolve_code(const std::string& code) = 0;
+        virtual void resolve_hw_reply(nlohmann::json&& reply) = 0;
 
         virtual nlohmann::json get_status() const = 0;
         virtual state_type get_state() const = 0;
@@ -52,10 +53,16 @@ namespace sdk {
         virtual const nlohmann::json& get_twofactor_data() const = 0;
         virtual const std::string& get_code() const = 0;
         virtual const nlohmann::json& get_hw_reply() const = 0;
+        virtual nlohmann::json&& move_result() = 0;
 
         virtual void operator()() = 0;
         virtual session_impl& get_session() const = 0;
         virtual std::shared_ptr<signer> get_signer() const = 0;
+
+        auth_handler* get_next_handler() const;
+        void add_next_handler(auth_handler* next);
+        std::unique_ptr<auth_handler> remove_next_handler();
+        virtual bool on_next_handler_complete(auth_handler* next_handler);
 
     protected:
         virtual void signal_hw_request(hw_request request);
@@ -64,6 +71,8 @@ namespace sdk {
 
         virtual void request_code_impl(const std::string& method);
         virtual state_type call_impl();
+
+        std::unique_ptr<auth_handler> m_next_handler;
     };
 
     struct auth_handler_impl : public auth_handler {
@@ -73,6 +82,7 @@ namespace sdk {
 
         void request_code(const std::string& method) override;
         void resolve_code(const std::string& code) final;
+        void resolve_hw_reply(nlohmann::json&& reply) override;
 
         nlohmann::json get_status() const final;
         state_type get_state() const final;
@@ -80,6 +90,7 @@ namespace sdk {
         const nlohmann::json& get_twofactor_data() const final;
         const std::string& get_code() const final;
         const nlohmann::json& get_hw_reply() const final;
+        nlohmann::json&& move_result() final;
 
         void operator()() final;
         session_impl& get_session() const final;
@@ -92,11 +103,9 @@ namespace sdk {
 
         void request_code_impl(const std::string& method) final;
 
-    private:
-        session& m_session_parent;
-
     protected:
-        boost::shared_ptr<session_impl> m_session;
+        session& m_session_parent;
+        std::shared_ptr<session_impl> m_session;
         const network_parameters& m_net_params;
         const std::string m_name; // Name of the method being resolved
         std::shared_ptr<signer> m_signer;
@@ -112,18 +121,18 @@ namespace sdk {
         auth_handler::state_type m_state; // Current state
         uint32_t m_attempts_remaining;
         hw_request m_hw_request;
-        bool m_use_anti_exfil;
 
     private:
         bool has_retry_counter() const;
     };
 
     struct auto_auth_handler : public auth_handler {
-        auto_auth_handler(auth_handler* m_handler);
+        auto_auth_handler(auth_handler* handler);
         ~auto_auth_handler();
 
         void request_code(const std::string& method) override;
         void resolve_code(const std::string& code) final;
+        void resolve_hw_reply(nlohmann::json&& reply) final;
 
         nlohmann::json get_status() const final;
         state_type get_state() const final;
@@ -131,6 +140,7 @@ namespace sdk {
         const nlohmann::json& get_twofactor_data() const final;
         const std::string& get_code() const final;
         const nlohmann::json& get_hw_reply() const final;
+        nlohmann::json&& move_result() final;
 
         void operator()() final;
         virtual session_impl& get_session() const final;
@@ -139,6 +149,9 @@ namespace sdk {
         void advance();
 
     private:
+        auth_handler* get_current_handler() const;
+        std::unique_ptr<auth_handler> pop_handler();
+
         bool step();
         bool are_all_paths_cached(std::shared_ptr<signer> signer, const nlohmann::json& paths) const;
         nlohmann::json get_xpubs(std::shared_ptr<signer> signer, const nlohmann::json& paths) const;

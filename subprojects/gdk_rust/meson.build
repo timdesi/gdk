@@ -29,10 +29,10 @@ if target_os != ''
 endif
 
 rust_sources = [
-  'Cargo.toml',
-  'src/error.rs',
-  'src/lib.rs',
-  'src/serialize.rs',
+  'gdk_rust/Cargo.toml',
+  'gdk_rust/src/error.rs',
+  'gdk_rust/src/lib.rs',
+  'gdk_rust/src/serialize.rs',
 
   'gdk_common/Cargo.toml',
   'gdk_common/src/be/mod.rs',
@@ -48,18 +48,27 @@ rust_sources = [
   'gdk_common/src/model.rs',
   'gdk_common/src/network.rs',
   'gdk_common/src/password.rs',
-  'gdk_common/src/session.rs',
   'gdk_common/src/scripts.rs',
 
   'gdk_electrum/Cargo.toml',
   'gdk_electrum/src/store.rs',
   'gdk_electrum/src/error.rs',
   'gdk_electrum/src/interface.rs',
+  'gdk_electrum/src/notification.rs',
   'gdk_electrum/src/lib.rs',
   'gdk_electrum/src/headers/mod.rs',
   'gdk_electrum/src/headers/liquid.rs',
   'gdk_electrum/src/headers/bitcoin.rs',
 
+  'gdk_registry/Cargo.toml',
+  'gdk_registry/src/error.rs',
+  'gdk_registry/src/file.rs',
+  'gdk_registry/src/http.rs',
+  'gdk_registry/src/inner.rs',
+  'gdk_registry/src/lib.rs',
+  'gdk_registry/src/param.rs',
+  'gdk_registry/src/result.rs',
+  'gdk_registry/src/hard/mod.rs',
 ]
 
 gdk_rust_target = custom_target('libgdk_rust',

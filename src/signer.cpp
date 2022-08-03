@@ -25,7 +25,7 @@ namespace sdk {
         static nlohmann::json get_credentials_json(const nlohmann::json& credentials)
         {
             if (credentials.empty()) {
-                // Hardware wallet
+                // Hardware wallet or remote service
                 return {};
             }
 
@@ -43,12 +43,22 @@ namespace sdk {
                     // Mnemonic, possibly encrypted
                     const auto password_p = credentials.find("password");
                     if (password_p != credentials.end()) {
+                        GDK_RUNTIME_ASSERT_MSG(
+                            !credentials.contains("bip39_passphrase"), "cannot use bip39_passphrase and password");
                         // Encrypted; decrypt it
                         mnemonic = decrypt_mnemonic(mnemonic, *password_p);
                     }
-                    return { { "mnemonic", mnemonic }, { "seed", b2h(bip39_mnemonic_to_seed(mnemonic)) } };
+                    const std::string passphrase = json_get_value(credentials, "bip39_passphrase");
+                    nlohmann::json ret
+                        = { { "mnemonic", mnemonic }, { "seed", b2h(bip39_mnemonic_to_seed(mnemonic, passphrase)) } };
+                    if (!passphrase.empty()) {
+                        ret["bip39_passphrase"] = passphrase;
+                    }
+                    return ret;
                 }
                 if (mnemonic.size() == 129u && mnemonic.back() == 'X') {
+                    GDK_RUNTIME_ASSERT_MSG(
+                        !credentials.contains("bip39_passphrase"), "cannot use bip39_passphrase and hex seed");
                     // Hex seed (a 512 bits bip32 seed encoding in hex with 'X' appended)
                     mnemonic.pop_back();
                     return { { "seed", mnemonic } };
@@ -57,9 +67,14 @@ namespace sdk {
             throw user_error("Invalid credentials");
         }
 
-        static const nlohmann::json WATCH_ONLY_DEVICE_JSON{ { "device_type", "watch-only" }, { "supports_low_r", true },
+        static const nlohmann::json GREEN_DEVICE_JSON{ { "device_type", "green-backend" }, { "supports_low_r", true },
             { "supports_arbitrary_scripts", true }, { "supports_host_unblinding", false },
-            { "supports_liquid", liquid_support_level::none },
+            { "supports_liquid", liquid_support_level::lite },
+            { "supports_ae_protocol", ae_protocol_support_level::none } };
+
+        static const nlohmann::json WATCH_ONLY_DEVICE_JSON{ { "device_type", "watch-only" }, { "supports_low_r", true },
+            { "supports_arbitrary_scripts", true }, { "supports_host_unblinding", true },
+            { "supports_liquid", liquid_support_level::lite },
             { "supports_ae_protocol", ae_protocol_support_level::none } };
 
         static const nlohmann::json SOFTWARE_DEVICE_JSON{ { "device_type", "software" }, { "supports_low_r", true },
@@ -75,7 +90,7 @@ namespace sdk {
             if (!device.empty()) {
                 ret.swap(device);
                 if (!credentials.empty()) {
-                    throw user_error("Hardware device and login credentials cannot be used together");
+                    throw user_error("HWW/remote signer and login credentials cannot be used together");
                 }
             } else if (credentials.contains("username")) {
                 ret = WATCH_ONLY_DEVICE_JSON;
@@ -96,6 +111,9 @@ namespace sdk {
                 if (ret.value("name", std::string()).empty()) {
                     throw user_error("Hardware device JSON requires a non-empty 'name' element");
                 }
+            } else if (ret.at("device_type") == "green-backend") {
+                // Don't allow overriding Green backend settings
+                ret = GREEN_DEVICE_JSON;
             }
             return ret;
         }
@@ -110,6 +128,18 @@ namespace sdk {
     };
     const std::array<unsigned char, 8> signer::BLOB_SALT = {
         { 0x62, 0x6c, 0x6f, 0x62, 0x73, 0x61, 0x6c, 0x74 } // 'blobsalt'
+    };
+    const std::array<unsigned char, 8> signer::WATCH_ONLY_SALT = {
+        { 0x5f, 0x77, 0x6f, 0x5f, 0x73, 0x61, 0x6c, 0x74 } // '_wo_salt'
+    };
+    const std::array<unsigned char, 8> signer::WO_SEED_U = {
+        { 0x01, 0x77, 0x6f, 0x5f, 0x75, 0x73, 0x65, 0x72 } // [1]'wo_user'
+    };
+    const std::array<unsigned char, 8> signer::WO_SEED_P = {
+        { 0x02, 0x77, 0x6f, 0x5f, 0x70, 0x61, 0x73, 0x73 } // [2]'wo_pass'
+    };
+    const std::array<unsigned char, 8> signer::WO_SEED_K = {
+        { 0x03, 0x77, 0x6f, 0x5f, 0x62, 0x6C, 0x6f, 0x62 } // [3]'wo_blob'
     };
 
     signer::signer(
@@ -151,7 +181,7 @@ namespace sdk {
 
     std::string signer::get_mnemonic(const std::string& password)
     {
-        if (is_hardware() || is_watch_only()) {
+        if (is_hardware() || is_watch_only() || is_remote()) {
             return std::string();
         }
         const auto mnemonic_p = m_credentials.find("mnemonic");
@@ -163,10 +193,8 @@ namespace sdk {
 
     bool signer::supports_low_r() const
     {
-        if (get_ae_protocol_support() != ae_protocol_support_level::none) {
-            return false; // Always use AE if the HW supports it
-        }
-        return m_device["supports_low_r"];
+        // Note we always use AE if the HW supports it
+        return !use_ae_protocol() && m_device["supports_low_r"];
     }
 
     bool signer::supports_arbitrary_scripts() const { return m_device["supports_arbitrary_scripts"]; }
@@ -176,6 +204,10 @@ namespace sdk {
     bool signer::supports_host_unblinding() const { return m_device["supports_host_unblinding"]; }
 
     ae_protocol_support_level signer::get_ae_protocol_support() const { return m_device["supports_ae_protocol"]; }
+
+    bool signer::use_ae_protocol() const { return get_ae_protocol_support() != ae_protocol_support_level::none; }
+
+    bool signer::is_remote() const { return m_device["device_type"] == "green-backend"; }
 
     bool signer::is_liquid() const { return m_is_liquid; }
 
@@ -217,6 +249,8 @@ namespace sdk {
         }
         return ret;
     }
+
+    std::string signer::get_master_bip32_xpub() { return get_bip32_xpub(std::vector<uint32_t>()); }
 
     bool signer::has_bip32_xpub(const std::vector<uint32_t>& path)
     {

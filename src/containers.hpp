@@ -78,9 +78,6 @@ namespace sdk {
         return to_remove;
     }
 
-    // Filter items without a valid asset id key (32 byte/64 char hex string)
-    std::vector<std::string> json_filter_bad_asset_ids(nlohmann::json& data);
-
 } // namespace sdk
 } // namespace ga
 

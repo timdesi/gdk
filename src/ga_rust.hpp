@@ -4,61 +4,78 @@
 
 namespace ga {
 namespace sdk {
-    struct tor_controller;
-
     class ga_rust final : public session_impl {
     public:
         explicit ga_rust(network_parameters&& net_params);
         ~ga_rust();
 
-        bool is_connected() const;
-        void set_ping_fail_handler(ping_fail_t handler);
-        void set_heartbeat_timeout_handler(websocketpp::pong_timeout_handler);
-        bool reconnect();
-        void try_reconnect();
-        void reconnect_hint(bool, bool);
-
-        // TODO: remove me when tor MR extract lands
-        void tor_sleep_hint(const std::string& hint);
-        std::string get_tor_socks5();
+        void reconnect();
+        void reconnect_hint(const nlohmann::json& hint);
 
         void connect();
         void disconnect();
 
-        nlohmann::json http_request(nlohmann::json params);
-        nlohmann::json refresh_assets(const nlohmann::json& params);
         nlohmann::json validate_asset_domain_name(const nlohmann::json& params);
-
         std::string get_challenge(const pub_key_t& public_key);
         nlohmann::json authenticate(const std::string& sig_der_hex, const std::string& path_hex,
             const std::string& root_bip32_xpub, std::shared_ptr<signer> signer);
-        void register_subaccount_xpubs(const std::vector<std::string>& bip32_xpubs);
+        void register_subaccount_xpubs(
+            const std::vector<uint32_t>& pointers, const std::vector<std::string>& bip32_xpubs);
         nlohmann::json login(std::shared_ptr<signer> signer);
-        std::string mnemonic_from_pin_data(const nlohmann::json& pin_data);
-        nlohmann::json login_watch_only(std::shared_ptr<signer> signer);
-        bool set_watch_only(const std::string& username, const std::string& password);
-        std::string get_watch_only_username();
+        nlohmann::json credentials_from_pin_data(const nlohmann::json& pin_data);
+        nlohmann::json login_wo(std::shared_ptr<signer> signer);
+        bool set_wo_credentials(const std::string& username, const std::string& password);
+        std::string get_wo_username();
         bool remove_account(const nlohmann::json& twofactor_data);
 
+        bool discover_subaccount(const std::string& xpub, const std::string& type);
         uint32_t get_next_subaccount(const std::string& type);
         nlohmann::json create_subaccount(const nlohmann::json& details, uint32_t subaccount, const std::string& xpub);
+
+        // Get the master blinding key from the rust cache if available.
+        // If the master blinding key is missing,
+        // The caller should obtain it from the signer and set it with
+        // set_cached_master_blinding_key
+        std::pair<std::string, bool> get_cached_master_blinding_key();
+
+        // Set the master blinding key in the rust cache.
+        // If the cache has already a master blinding key,
+        // attempting to set a different key results in an error.
+        void set_cached_master_blinding_key(const std::string& master_blinding_key_hex);
+
+        // Start the rust sync threads.
+        // This must be done once the store is loaded
+        // and for liquid after the master blinding key is set.
+        void start_sync_threads();
+
+        // Get the subaccount pointers for the subaccount that belongs to the wallet.
+        // For each of these subaccounts, the caller should set the xpub with
+        // create_subaccount if the xpub missing from the store.
+        std::vector<uint32_t> get_subaccount_pointers();
+
+        // Get the subaccount xpub from the rust store if available.
+        // If the account or xpub is missing,
+        // the caller should obtain it from the signer and set it
+        // create_subaccount.
+        nlohmann::json get_subaccount_xpub(uint32_t subaccount);
 
         void change_settings_limits(const nlohmann::json& limit_details, const nlohmann::json& twofactor_data);
         nlohmann::json get_transactions(const nlohmann::json& details);
 
         nlohmann::json get_receive_address(const nlohmann::json& details);
-        nlohmann::json get_previous_addresses(uint32_t subaccount, uint32_t last_pointer);
+        nlohmann::json get_previous_addresses(const nlohmann::json& details);
         nlohmann::json get_subaccounts();
         nlohmann::json get_subaccount(uint32_t subaccount);
         void rename_subaccount(uint32_t subaccount, const std::string& new_name);
         void set_subaccount_hidden(uint32_t subaccount, bool is_hidden);
         std::vector<uint32_t> get_subaccount_root_path(uint32_t subaccount);
-        std::vector<uint32_t> get_subaccount_full_path(uint32_t subaccount, uint32_t pointer);
+        std::vector<uint32_t> get_subaccount_full_path(uint32_t subaccount, uint32_t pointer, bool is_internal);
 
         nlohmann::json get_available_currencies() const;
 
         bool is_rbf_enabled() const;
         bool is_watch_only() const;
+        void ensure_full_session();
         nlohmann::json get_settings();
         nlohmann::json get_post_login_data();
         void change_settings(const nlohmann::json& settings);
@@ -86,16 +103,19 @@ namespace sdk {
 
         nlohmann::json cancel_twofactor_reset(const nlohmann::json& twofactor_data);
 
-        nlohmann::json set_pin(const std::string& mnemonic, const std::string& pin, const std::string& device_id);
+        nlohmann::json encrypt_with_pin(const nlohmann::json& details);
 
         nlohmann::json get_unspent_outputs(const nlohmann::json& details, unique_pubkeys_and_scripts_t& missing);
         nlohmann::json get_unspent_outputs_for_private_key(
             const std::string& private_key, const std::string& password, uint32_t unused);
         nlohmann::json set_unspent_outputs_status(const nlohmann::json& details, const nlohmann::json& twofactor_data);
         wally_tx_ptr get_raw_transaction_details(const std::string& txhash_hex) const;
+        nlohmann::json get_transaction_details(const std::string& txhash_hex) const;
 
         nlohmann::json create_transaction(const nlohmann::json& details);
-        nlohmann::json sign_transaction(const nlohmann::json& details);
+        nlohmann::json user_sign_transaction(const nlohmann::json& details);
+        nlohmann::json service_sign_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data);
+        nlohmann::json psbt_sign(const nlohmann::json& details);
         nlohmann::json send_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data);
         std::string broadcast_transaction(const std::string& tx_hex);
 
@@ -124,23 +144,16 @@ namespace sdk {
         amount get_dust_threshold() const;
         nlohmann::json get_spending_limits() const;
         bool is_spending_limits_decrease(const nlohmann::json& limit_details);
+        void set_local_encryption_keys(const pub_key_t& public_key, std::shared_ptr<signer> signer);
 
         ga_pubkeys& get_ga_pubkeys();
-        user_pubkeys& get_user_pubkeys();
-        ga_user_pubkeys& get_recovery_pubkeys();
+        user_pubkeys& get_recovery_pubkeys();
 
         void disable_all_pin_logins();
 
-        static int32_t spv_verify_tx(const nlohmann::json& details);
-
     private:
-        nlohmann::json call_session(const std::string& method, const nlohmann::json& input) const;
-
         static void GDKRUST_notif_handler(void* self_context, char* json);
         void set_notification_handler(GA_notification_handler handler, void* context);
-
-        std::shared_ptr<tor_controller> m_tor_ctrl;
-        bool m_reconnect_restart;
 
         void* m_session;
     };

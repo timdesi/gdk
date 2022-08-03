@@ -2,9 +2,9 @@
 
 #include "assertion.hpp"
 #include "exception.hpp"
-#include "ga_session.hpp"
 #include "ga_strings.hpp"
 #include "memory.hpp"
+#include "session_impl.hpp"
 #include "transaction_utils.hpp"
 #include "utils.hpp"
 #include "xpub_hdkey.hpp"
@@ -20,7 +20,7 @@ bool isupper(const std::string& s)
 using namespace ga::sdk;
 
 static std::vector<unsigned char> output_script_for_address(
-    const network_parameters& net_params, uint32_t block_height, std::string address, std::string& error)
+    const network_parameters& net_params, std::string address, std::string& error)
 {
     // bech32 is a vanilla bech32 address, blech32 is a confidential liquid address
     const bool is_bech32 = boost::starts_with(address, net_params.bech32_prefix());
@@ -45,10 +45,6 @@ static std::vector<unsigned char> output_script_for_address(
         std::vector<unsigned char> ret;
         try {
             ret = addr_segwit_to_bytes(address, net_params.bech32_prefix());
-            auto segwit_version = addr_segwit_get_version(address, net_params.bech32_prefix());
-            if (segwit_version > 0 && block_height <= net_params.get_taproot_enabled_at()) {
-                error = "Taproot has not yet activated on this network";
-            }
         } catch (const std::exception&) {
             error = res::id_invalid_address;
         }
@@ -72,12 +68,12 @@ static std::vector<unsigned char> output_script_for_address(
 }
 
 static std::vector<unsigned char> output_script_for_address(
-    const network_parameters& net_params, uint32_t block_height, const std::string& address, nlohmann::json& result)
+    const network_parameters& net_params, const std::string& address, nlohmann::json& result)
 {
     std::vector<unsigned char> script;
     std::string error;
     try {
-        script = output_script_for_address(net_params, block_height, address, error);
+        script = output_script_for_address(net_params, address, error);
     } catch (const std::exception& e) {
         error = res::id_invalid_address;
     }
@@ -99,6 +95,8 @@ namespace ga {
 namespace sdk {
     namespace address_type {
         const std::string p2pkh("p2pkh");
+        const std::string p2wpkh("p2wpkh");
+        const std::string p2sh_p2wpkh("p2sh-p2wpkh");
         const std::string p2sh("p2sh");
         const std::string p2wsh("p2wsh");
         const std::string csv("csv");
@@ -117,9 +115,6 @@ namespace sdk {
 #define SIG_HIGH SIG_BYTES(OP_INVALIDOPCODE, OP_SUBSTR)
 #define SIG_LOW SIG_BYTES(OP_SUBSTR, OP_SUBSTR)
 
-#define SIG_72(INITIAL, B) SIG_HIGH, SIG_HIGH
-#define SIG_71(INITIAL, B) SIG_LOW, SIG_HIGH
-
     static const ecdsa_sig_t DUMMY_GA_SIG = { { SIG_HIGH, SIG_HIGH } };
     static const ecdsa_sig_t DUMMY_GA_SIG_LOW_R = { { SIG_LOW, SIG_HIGH } };
 
@@ -131,37 +126,75 @@ namespace sdk {
 
     static const std::array<unsigned char, 3> OP_0_PREFIX = { { 0x00, 0x01, 0x00 } };
 
+    static auto base58_address_from_bytes(unsigned char version, byte_span_t script_or_pubkey)
+    {
+        std::array<unsigned char, HASH160_LEN + 1> addr_bytes;
+        addr_bytes[0] = version;
+        GDK_VERIFY(
+            wally_hash160(script_or_pubkey.data(), script_or_pubkey.size(), addr_bytes.begin() + 1, HASH160_LEN));
+        return base58check_from_bytes(addr_bytes);
+    }
+
     inline auto p2sh_address_from_bytes(const network_parameters& net_params, byte_span_t script)
     {
-        std::array<unsigned char, HASH160_LEN + 1> addr;
-        const auto hash = hash160(script);
-        addr[0] = net_params.btc_p2sh_version();
-        std::copy(hash.begin(), hash.end(), addr.begin() + 1);
-        return addr;
+        return base58_address_from_bytes(net_params.btc_p2sh_version(), script);
+    }
+
+    inline auto p2pkh_address_from_public_key(const network_parameters& net_params, byte_span_t public_key)
+    {
+        return base58_address_from_bytes(net_params.btc_version(), public_key);
+    }
+
+    static auto p2sh_wrapped_address_from_bytes(
+        const network_parameters& net_params, byte_span_t script_or_pubkey, uint32_t flags)
+    {
+        const uint32_t witness_ver = 0;
+        return p2sh_address_from_bytes(net_params, witness_program_from_bytes(script_or_pubkey, witness_ver, flags));
     }
 
     inline auto p2sh_p2wsh_address_from_bytes(const network_parameters& net_params, byte_span_t script)
     {
+        return p2sh_wrapped_address_from_bytes(net_params, script, WALLY_SCRIPT_SHA256);
+    }
+
+    inline auto p2sh_p2wpkh_address_from_public_key(const network_parameters& net_params, byte_span_t public_key)
+    {
+        return p2sh_wrapped_address_from_bytes(net_params, public_key, WALLY_SCRIPT_HASH160);
+    }
+
+    inline auto p2wpkh_address_from_public_key(const network_parameters& net_params, byte_span_t public_key)
+    {
         const uint32_t witness_ver = 0;
-        return p2sh_address_from_bytes(
-            net_params, witness_program_from_bytes(script, witness_ver, WALLY_SCRIPT_SHA256));
+        const auto witness_program = witness_program_from_bytes(public_key, witness_ver, WALLY_SCRIPT_HASH160);
+        return addr_segwit_from_bytes(witness_program, net_params.bech32_prefix());
     }
 
     std::string get_address_from_script(
         const network_parameters& net_params, byte_span_t script, const std::string& addr_type)
     {
         if (addr_type == address_type::p2sh) {
-            return base58check_from_bytes(p2sh_address_from_bytes(net_params, script));
+            return p2sh_address_from_bytes(net_params, script);
         }
-        if (addr_type == address_type::p2wsh || addr_type == address_type::csv) {
-            return base58check_from_bytes(p2sh_p2wsh_address_from_bytes(net_params, script));
+        GDK_RUNTIME_ASSERT(addr_type == address_type::p2wsh || addr_type == address_type::csv);
+        return p2sh_p2wsh_address_from_bytes(net_params, script);
+    }
+
+    std::string get_address_from_public_key(
+        const network_parameters& net_params, byte_span_t public_key, const std::string& addr_type)
+    {
+        GDK_VERIFY(wally_ec_public_key_verify(public_key.data(), public_key.size()));
+
+        if (addr_type == address_type::p2sh_p2wpkh) {
+            return p2sh_p2wpkh_address_from_public_key(net_params, public_key);
+        } else if (addr_type == address_type::p2wpkh) {
+            return p2wpkh_address_from_public_key(net_params, public_key);
         }
-        GDK_RUNTIME_ASSERT(false);
-        __builtin_unreachable();
+        GDK_RUNTIME_ASSERT(addr_type == address_type::p2pkh);
+        return p2pkh_address_from_public_key(net_params, public_key);
     }
 
     static std::vector<unsigned char> output_script(const network_parameters& net_params, const pub_key_t& ga_pub_key,
-        const pub_key_t& user_pub_key, byte_span_t backup_pub_key, script_type type, uint32_t subtype)
+        const pub_key_t& user_pub_key, byte_span_t backup_pub_key, const std::string& addr_type, uint32_t subtype)
     {
         const bool is_2of3 = !backup_pub_key.empty();
 
@@ -179,7 +212,7 @@ namespace sdk {
         const size_t max_script_len = 13 + n_pubkeys * (ga_pub_key.size() + 1) + 4;
         std::vector<unsigned char> script(max_script_len);
 
-        if (type == script_type::ga_p2sh_p2wsh_csv_fortified_out && !is_2of3) {
+        if (addr_type == address_type::csv && !is_2of3) {
             // CSV 2of2, subtype is the number of CSV blocks
             const bool optimize = !net_params.is_liquid(); // Liquid uses old style CSV
             scriptpubkey_csv_2of2_then_1_from_bytes(keys, subtype, optimize, script);
@@ -195,11 +228,11 @@ namespace sdk {
     {
         const uint32_t subaccount = json_get_value(utxo, "subaccount", 0u);
         const uint32_t pointer = utxo.at("pointer");
-        script_type type;
+        const uint32_t version = utxo.value("version", 1u);
+        const std::string addr_type = utxo.at("address_type");
 
-        type = utxo.at("script_type");
         uint32_t subtype = 0;
-        if (type == script_type::ga_p2sh_p2wsh_csv_fortified_out) {
+        if (addr_type == address_type::csv) {
             // subtype indicates the number of csv blocks and must be one of the known bucket values
             subtype = utxo.at("subtype");
             const auto csv_buckets = net_params.csv_buckets();
@@ -207,16 +240,22 @@ namespace sdk {
             GDK_RUNTIME_ASSERT_MSG(csv_bucket_p != csv_buckets.end(), "Unknown csv bucket");
         }
 
-        const auto ga_pub_key = pubkeys.derive(subaccount, pointer);
+        pub_key_t ga_pub_key;
+        if (version == 0) {
+            // Service keys for legacy version 0 addresses are not derived from the user's GA path
+            ga_pub_key = h2b<EC_PUBLIC_KEY_LEN>(net_params.pub_key());
+        } else {
+            ga_pub_key = pubkeys.derive(subaccount, pointer);
+        }
         const auto user_pub_key = usr_pubkeys.derive(subaccount, pointer);
 
         if (recovery_pubkeys.have_subaccount(subaccount)) {
             // 2of3
             return output_script(
-                net_params, ga_pub_key, user_pub_key, recovery_pubkeys.derive(subaccount, pointer), type, subtype);
+                net_params, ga_pub_key, user_pub_key, recovery_pubkeys.derive(subaccount, pointer), addr_type, subtype);
         }
         // 2of2
-        return output_script(net_params, ga_pub_key, user_pub_key, empty_span(), type, subtype);
+        return output_script(net_params, ga_pub_key, user_pub_key, empty_span(), addr_type, subtype);
     }
 
     std::vector<unsigned char> input_script(bool low_r, const std::vector<unsigned char>& prevout_script,
@@ -229,6 +268,20 @@ namespace sdk {
         std::vector<unsigned char> script(1 + (sig_len + 2) * 2 + 3 + prevout_script.size());
         scriptsig_multisig_from_bytes(prevout_script, sigs, sighashes, script);
         return script;
+    }
+
+    bool is_segwit_address_type(const nlohmann::json& utxo)
+    {
+        const std::string addr_type = utxo.at("address_type");
+        if (addr_type == address_type::csv || addr_type == address_type::p2wsh || addr_type == address_type::p2wpkh
+            || addr_type == address_type::p2sh_p2wpkh) {
+            return true;
+        }
+        if (addr_type == address_type::p2sh || addr_type == address_type::p2pkh) {
+            return false;
+        }
+        GDK_RUNTIME_ASSERT_MSG(false, std::string("unknown address_type ") + addr_type);
+        return false;
     }
 
     std::string asset_id_from_json(const network_parameters& net_params, const nlohmann::json& json)
@@ -277,7 +330,7 @@ namespace sdk {
         return scriptsig_p2pkh_from_der(pub_key, ec_sig_to_der(dummy_sig, true));
     }
 
-    std::vector<unsigned char> witness_script(const std::vector<unsigned char>& script, uint32_t witness_ver)
+    std::vector<unsigned char> witness_script(byte_span_t script, uint32_t witness_ver)
     {
         return witness_program_from_bytes(script, witness_ver, WALLY_SCRIPT_SHA256 | WALLY_SCRIPT_AS_PUSH);
     }
@@ -293,11 +346,11 @@ namespace sdk {
     }
 
     std::vector<unsigned char> scriptpubkey_from_address(
-        const network_parameters& net_params, uint32_t block_height, const std::string& address)
+        const network_parameters& net_params, const std::string& address, bool confidential)
     {
         std::string error;
-        std::vector<unsigned char> script = output_script_for_address(net_params, block_height, address, error);
-        GDK_RUNTIME_ASSERT(error.empty());
+        std::vector<unsigned char> script = output_script_for_address(net_params, address, error);
+        GDK_RUNTIME_ASSERT(error.empty() || (!confidential && error == res::id_nonconfidential_addresses_not));
         return script;
     }
 
@@ -309,10 +362,10 @@ namespace sdk {
         }
     }
 
-    amount add_tx_output(const network_parameters& net_params, uint32_t block_height, nlohmann::json& result,
-        wally_tx_ptr& tx, const std::string& address, amount::value_type satoshi, const std::string& asset_id)
+    amount add_tx_output(const network_parameters& net_params, nlohmann::json& result, wally_tx_ptr& tx,
+        const std::string& address, amount::value_type satoshi, const std::string& asset_id)
     {
-        std::vector<unsigned char> script = output_script_for_address(net_params, block_height, address, result);
+        std::vector<unsigned char> script = output_script_for_address(net_params, address, result);
 
         if (net_params.is_liquid()) {
             const auto ct_value = tx_confidential_value_from_satoshi(satoshi);
@@ -344,10 +397,6 @@ namespace sdk {
     std::string validate_tx_addressee(
         const network_parameters& net_params, nlohmann::json& result, nlohmann::json& addressee)
     {
-        // FIXME: Remove this renaming when the wallets have upgraded to use
-        // asset_id in their addressees.
-        json_rename_key(addressee, "asset_tag", "asset_id");
-
         std::string address = addressee.at("address"); // Assume its a standard address
 
         const auto uri = parse_bitcoin_uri(address, net_params.bip21_prefix());
@@ -371,7 +420,7 @@ namespace sdk {
         return asset_id_from_json(net_params, addressee);
     }
 
-    amount add_tx_addressee(ga_session& session, const network_parameters& net_params, nlohmann::json& result,
+    amount add_tx_addressee(session_impl& session, const network_parameters& net_params, nlohmann::json& result,
         wally_tx_ptr& tx, nlohmann::json& addressee)
     {
         std::string address = addressee.at("address"); // Assume its a standard address
@@ -428,14 +477,14 @@ namespace sdk {
         amount::strip_non_satoshi_keys(addressee);
         addressee["satoshi"] = satoshi.value(); // Sets to 0 if not present
 
-        return add_tx_output(net_params, session.get_block_height(), result, tx, address, satoshi.value(),
-            asset_id_from_json(net_params, addressee));
+        return add_tx_output(
+            net_params, result, tx, address, satoshi.value(), asset_id_from_json(net_params, addressee));
     }
 
     void update_tx_size_info(const network_parameters& net_params, const wally_tx_ptr& tx, nlohmann::json& result)
     {
         const bool valid = tx->num_inputs != 0u && tx->num_outputs != 0u;
-        result["transaction"] = valid ? b2h(tx_to_bytes(tx)) : std::string();
+        result["transaction"] = valid ? tx_to_hex(tx) : std::string();
         const auto weight = tx_get_weight(tx);
         result["transaction_size"] = valid ? tx_get_length(tx, WALLY_TX_FLAG_USE_WITNESS) : 0;
         result["transaction_weight"] = valid ? weight : 0;
@@ -529,14 +578,14 @@ namespace sdk {
                     const auto& change_address = result.at("change_address").at(asset_id);
                     output.insert(change_address.begin(), change_address.end());
                     if (is_liquid) {
-                        output["public_key"] = blinding_key_from_addr(change_address.at("address"));
+                        output["blinding_key"] = blinding_key_from_addr(change_address.at("address"));
                     }
                 } else {
                     const auto& addressee = result.at("addressees").at(addressee_index);
                     const auto& address = addressee.at("address");
                     output["address"] = address;
                     if (is_liquid) {
-                        output["public_key"] = blinding_key_from_addr(address);
+                        output["blinding_key"] = blinding_key_from_addr(address);
                     }
                     ++addressee_index;
                 }

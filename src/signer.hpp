@@ -34,6 +34,10 @@ namespace sdk {
         static const std::array<uint32_t, 1> CLIENT_SECRET_PATH;
         static const std::array<unsigned char, 8> PASSWORD_SALT;
         static const std::array<unsigned char, 8> BLOB_SALT;
+        static const std::array<unsigned char, 8> WATCH_ONLY_SALT;
+        static const std::array<unsigned char, 8> WO_SEED_U;
+        static const std::array<unsigned char, 8> WO_SEED_P;
+        static const std::array<unsigned char, 8> WO_SEED_K;
 
         using cache_t = std::map<std::vector<uint32_t>, std::string>;
 
@@ -67,6 +71,14 @@ namespace sdk {
         // Returns how this signer supports the Anti-Exfil protocol
         ae_protocol_support_level get_ae_protocol_support() const;
 
+        // Returns true if this signer should use the Anti-Exfil protocol.
+        // Currently always true if the signer supports it.
+        bool use_ae_protocol() const;
+
+        // Returns true if this signer is for a remote service
+        bool is_remote() const;
+
+        // Returns true if this signer is for a Liquid session
         bool is_liquid() const;
 
         // Returns true if this signer is watch-only (cannot sign)
@@ -85,6 +97,10 @@ namespace sdk {
         // xpub for privately derived master keys, since it may involve talking to
         // hardware. Use xpub_hdkeys_base to quickly derive from the resulting key.
         std::string get_bip32_xpub(const std::vector<uint32_t>& path);
+
+        // Get the master xpub. Equivalent to calling `get_bip32_xpub` with an
+        // empty path.
+        std::string get_master_bip32_xpub();
 
         // Whether this signer has a pre-computed cached xpub for the given path
         bool has_bip32_xpub(const std::vector<uint32_t>& path);

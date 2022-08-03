@@ -8,7 +8,7 @@ namespace ga {
 namespace sdk {
     class register_call : public auth_handler_impl {
     public:
-        register_call(session& session, const nlohmann::json& hw_device, const std::string& mnemonic);
+        register_call(session& session, const nlohmann::json& hw_device, const nlohmann::json& credential_data);
 
     private:
         state_type call_impl() override;
@@ -23,14 +23,13 @@ namespace sdk {
 
     private:
         state_type call_impl() override;
+        state_type request_subaccount_xpubs();
 
         const nlohmann::json m_hw_device;
         nlohmann::json m_credential_data;
         std::string m_challenge;
         std::string m_master_bip32_xpub;
-
-        // Used when AMP subaccounts require new addresses
-        std::vector<nlohmann::json> m_addresses;
+        nlohmann::json m_subaccount_pointers;
     };
 
     class create_subaccount_call : public auth_handler_impl {
@@ -72,9 +71,33 @@ namespace sdk {
     private:
         state_type call_impl() override;
         void initialize();
+        void set_signer_data(const std::shared_ptr<signer>& signer);
+        void sign_user_inputs(const std::shared_ptr<signer>& signer);
 
         nlohmann::json m_tx_details;
         bool m_initialized;
+    };
+
+    class psbt_sign_call : public auth_handler_impl {
+    public:
+        psbt_sign_call(session& session, const nlohmann::json& details);
+
+    private:
+        state_type call_impl() override;
+        void initialize();
+
+        nlohmann::json m_details;
+        bool m_initialized;
+    };
+
+    class psbt_get_details_call : public auth_handler_impl {
+    public:
+        psbt_get_details_call(session& session, const nlohmann::json& details);
+
+    private:
+        state_type call_impl() override;
+
+        nlohmann::json m_details;
     };
 
     class get_receive_address_call : public auth_handler_impl {
@@ -134,10 +157,14 @@ namespace sdk {
 
     class get_subaccounts_call : public auth_handler_impl {
     public:
-        get_subaccounts_call(session& session);
+        get_subaccounts_call(session& session, const nlohmann::json& details);
 
     private:
         state_type call_impl() override;
+
+        std::string m_subaccount_type;
+        uint32_t m_subaccount;
+        nlohmann::json m_details;
     };
 
     class get_subaccount_call : public auth_handler_impl {
@@ -263,7 +290,7 @@ namespace sdk {
 
     class send_transaction_call final : public auth_handler_impl {
     public:
-        send_transaction_call(session& session, const nlohmann::json& tx_details);
+        send_transaction_call(session& session, const nlohmann::json& tx_details, bool sign_only = false);
 
         void request_code(const std::string& method) override;
 
@@ -276,6 +303,7 @@ namespace sdk {
         nlohmann::json m_tx_details;
         nlohmann::json m_limit_details;
         uint64_t m_bump_amount;
+        const std::string m_type; // "send", or "sign" if sign_only == true
         bool m_twofactor_required;
         bool m_under_limit;
         bool m_initialized;
@@ -312,6 +340,26 @@ namespace sdk {
 
         nlohmann::json m_params;
         bool m_initialized;
+    };
+
+    class get_credentials_call : public auth_handler_impl {
+    public:
+        get_credentials_call(session& session, const nlohmann::json& details);
+
+    private:
+        state_type call_impl() override;
+
+        const nlohmann::json m_details;
+    };
+
+    class encrypt_with_pin_call : public auth_handler_impl {
+    public:
+        encrypt_with_pin_call(session& session, const nlohmann::json& details);
+
+    private:
+        state_type call_impl() override;
+
+        const nlohmann::json m_details;
     };
 } // namespace sdk
 } // namespace ga

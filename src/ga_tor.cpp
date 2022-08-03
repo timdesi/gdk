@@ -220,7 +220,7 @@ namespace sdk {
     };
 
     struct tor_controller_impl {
-        tor_controller_impl(const std::string& socks5_port);
+        tor_controller_impl(const std::string& socks5_port, const std::string& tor_datadir);
         ~tor_controller_impl();
 
         std::string wait_for_socks5(
@@ -232,7 +232,7 @@ namespace sdk {
         std::condition_variable m_init_cv;
         std::mutex m_init_mutex;
         struct event_base* m_base;
-        std::string m_tor_datadir;
+        const std::string m_tor_datadir;
         const std::string m_tor_control_file;
         std::string m_tor_control_port;
         std::unique_ptr<tor_control_connection> m_conn;
@@ -456,7 +456,7 @@ namespace sdk {
             }
         } while (tor_control_port.empty());
 
-        GDK_LOG_SEV(log_level::info) << "tor_control port " << tor_control_port;
+        GDK_LOG_SEV(log_level::info) << "tor: control port " << tor_control_port;
         GDK_RUNTIME_ASSERT(tor_control_port.size() > TOR_CONTROL_PORT_TAG.size());
         tor_control_port.erase(0, TOR_CONTROL_PORT_TAG.size());
         return tor_control_port;
@@ -465,16 +465,13 @@ namespace sdk {
     static std::string get_tor_control_file(const std::string& tor_datadir)
     {
         std::string tor_control_file = tor_datadir + "/.torcontrol";
-
-        GDK_LOG_SEV(log_level::info) << "Using '" << tor_datadir << "' as Tor datadir";
-
         clear_file(tor_control_file);
         return tor_control_file;
     }
 
-    tor_controller_impl::tor_controller_impl(const std::string& socks5_port)
+    tor_controller_impl::tor_controller_impl(const std::string& socks5_port, const std::string& tor_datadir)
         : m_base(init_eb())
-        , m_tor_datadir(std::string(gdk_config().at("datadir")) + "/tor")
+        , m_tor_datadir(tor_datadir)
         , m_tor_control_file(get_tor_control_file(m_tor_datadir))
         , m_stopping(false)
     {
@@ -485,9 +482,13 @@ namespace sdk {
         m_tor_run_thread = std::thread([&] {
             tor_main_configuration_t* tor_conf = tor_main_configuration_new();
             GDK_RUNTIME_ASSERT(tor_conf);
+            const bool quiet = gdk_config()["log_level"] == "none";
             std::vector<const char*> argv_conf;
             argv_conf.reserve(17);
             argv_conf.push_back("tor");
+            if (quiet) {
+                argv_conf.push_back("--quiet"); // Silence all log output
+            }
             argv_conf.push_back("__DisableSignalHandlers");
             argv_conf.push_back("1");
             argv_conf.push_back("SafeSocks");
@@ -505,8 +506,10 @@ namespace sdk {
             argv_conf.push_back("DataDirectory");
             argv_conf.push_back(m_tor_datadir.c_str());
 #if not defined(NDEBUG)
-            argv_conf.push_back("Log");
-            argv_conf.push_back("notice"); // debug prints out way too much stuff and we don't really need them
+            if (!quiet) {
+                argv_conf.push_back("Log");
+                argv_conf.push_back("notice"); // debug prints out way too much stuff and we don't really need them
+            }
 #endif
             int conf_res
                 = tor_main_configuration_set_command_line(tor_conf, argv_conf.size(), (char**)argv_conf.data());
@@ -737,8 +740,15 @@ namespace sdk {
         return m_socks5;
     }
 
+    static std::unique_ptr<tor_controller_impl> make_controller(const std::string& socks5_port)
+    {
+        const std::string tor_datadir = gdk_config()["tordir"];
+        GDK_LOG_SEV(log_level::info) << "tor: using '" << tor_datadir << "' as tor datadir";
+        return std::make_unique<tor_controller_impl>(socks5_port, tor_datadir);
+    }
+
     tor_controller::tor_controller()
-        : m_ctrl(new tor_controller_impl(""))
+        : m_ctrl(make_controller(std::string()))
     {
     }
 
@@ -762,11 +772,9 @@ namespace sdk {
     {
         std::lock_guard<std::mutex> _(m_ctrl_mutex);
 
-        if (m_ctrl) {
-            return;
+        if (!m_ctrl) {
+            m_ctrl = make_controller(m_socks5_port);
         }
-
-        m_ctrl = std::make_unique<tor_controller_impl>(m_socks5_port);
     }
 
     std::shared_ptr<tor_controller> tor_controller::get_shared_ref()
@@ -775,26 +783,15 @@ namespace sdk {
         std::shared_ptr<tor_controller> shared = s_inst.lock();
 
         if (!shared) {
-            GDK_RUNTIME_ASSERT(!gdk_config().at("datadir").empty());
+            GDK_RUNTIME_ASSERT(!json_get_value(gdk_config(), "tordir").empty());
             s_inst = shared = std::make_shared<tor_controller>();
         }
 
         return shared;
     }
 
-    void tor_controller::tor_sleep_hint(const std::string& hint)
-    {
-        if (hint == "sleep") {
-            // internally checks the state, no-op if already sleeping
-            sleep();
-        } else if (hint == "wakeup") {
-            // internally checks the state, no-op if already awake
-            wakeup();
-        }
-    }
-
     std::string tor_controller::wait_for_socks5(
-        uint32_t timeout, std::function<void(std::shared_ptr<tor_bootstrap_phase>)> phase_cb)
+        std::function<void(std::shared_ptr<tor_bootstrap_phase>)> phase_cb, uint32_t timeout)
     {
         // TODO: call phase_cb when sleeping (m_ctrl == null) to report it?
 

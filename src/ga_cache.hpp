@@ -13,6 +13,7 @@ struct sqlite3_stmt;
 namespace ga {
 namespace sdk {
     class network_parameters;
+    class signer;
 
     struct cache final {
         using sqlite3_ptr = std::shared_ptr<struct ::sqlite3>;
@@ -27,7 +28,9 @@ namespace sdk {
         void insert_liquid_output(byte_span_t txhash, const uint32_t vout, nlohmann::json& utxo);
 
         std::vector<unsigned char> get_liquid_blinding_nonce(byte_span_t pubkey, byte_span_t script);
-        void insert_liquid_blinding_nonce(byte_span_t pubkey, byte_span_t script, byte_span_t nonce);
+        std::vector<unsigned char> get_liquid_blinding_pubkey(byte_span_t script);
+        bool insert_liquid_blinding_data(
+            byte_span_t pubkey, byte_span_t script, byte_span_t nonce, byte_span_t blinding_pubkey);
 
         typedef std::function<void(boost::optional<byte_span_t>)> get_key_value_fn;
         void get_key_value(const std::string& key, const get_key_value_fn& callback);
@@ -56,19 +59,29 @@ namespace sdk {
         void get_transaction_data(const std::string& txhash_hex, const get_key_value_fn& callback);
         void insert_transaction_data(const std::string& txhash_hex, byte_span_t value);
 
+        nlohmann::json get_scriptpubkey_data(byte_span_t scriptpubkey);
+        void insert_scriptpubkey_data(byte_span_t scriptpubkey, uint32_t subaccount, uint32_t branch, uint32_t pointer,
+            uint32_t subtype, uint32_t script_type);
+        uint32_t get_latest_scriptpubkey_pointer(uint32_t subaccount);
+
         void save_db();
-        void load_db(byte_span_t encryption_key, const uint32_t type);
+        void load_db(byte_span_t encryption_key, std::shared_ptr<signer> signer);
+
+        void update_to_latest_minor_version();
 
     private:
+        bool check_db_changed();
+
         const std::string m_network_name;
-        const network_parameters& m_net_params;
+        const std::string m_data_dir;
         const bool m_is_liquid;
         uint32_t m_type; // Set on first call to load_db
-        std::string m_data_dir; // Set on first call to load_db
         std::string m_db_name; // Set on first call to load_db
         std::array<unsigned char, SHA256_LEN> m_encryption_key; // Set on first call to load_db
         bool m_require_write;
         sqlite3_ptr m_db;
+        sqlite3_stmt_ptr m_stmt_liquid_blinding_key_search;
+        sqlite3_stmt_ptr m_stmt_liquid_blinding_key_insert;
         sqlite3_stmt_ptr m_stmt_liquid_blinding_nonce_search;
         sqlite3_stmt_ptr m_stmt_liquid_blinding_nonce_insert;
         sqlite3_stmt_ptr m_stmt_liquid_output_search;
@@ -86,6 +99,9 @@ namespace sdk {
         sqlite3_stmt_ptr m_stmt_tx_delete_all;
         sqlite3_stmt_ptr m_stmt_txdata_insert;
         sqlite3_stmt_ptr m_stmt_txdata_search;
+        sqlite3_stmt_ptr m_stmt_scriptpubkey_search;
+        sqlite3_stmt_ptr m_stmt_scriptpubkey_insert;
+        sqlite3_stmt_ptr m_stmt_scriptpubkey_latest_search;
     };
 
 } // namespace sdk
