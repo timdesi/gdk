@@ -1691,9 +1691,10 @@ pub fn sign_pset(
 
     let mut inputs_amount = 0;
     for (index, input) in pset.inputs_mut().iter_mut().enumerate() {
-        let utxo = asset_utxos
-            .iter()
-            .find(|utxo| utxo.outpoint.txid().ref_elements() == Some(&input.previous_txid));
+        let utxo = asset_utxos.iter().find(|utxo| {
+            utxo.outpoint.txid().ref_elements() == Some(&input.previous_txid)
+                && utxo.outpoint.vout() == input.previous_output_index
+        });
         if let Some(utxo) = utxo {
             inputs_amount += utxo.satoshi;
             let derivation_path = acc_store.get_path(&utxo.script_pubkey.clone().into())?;
