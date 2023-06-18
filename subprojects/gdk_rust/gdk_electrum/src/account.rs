@@ -906,16 +906,27 @@ impl Account {
         Ok(betx)
     }
 
-    pub fn status(&self) -> Result<ScriptStatuses, Error> {
-        let store = self.store.read()?;
-        Ok(store.account_cache(self.account_num)?.script_statuses.clone().unwrap_or_default())
+    pub fn create_pset(
+        &self,
+        request: &gdk_common::model::CreatePset,
+    ) -> Result<gdk_common::model::PsetMeta, Error> {
+        if request.subaccount != self.account_num {
+            return Err(Error::InvalidSubaccount(request.subaccount));
+        }
+        create_pset(self, request)
     }
 
-    pub fn get_script(
+    pub fn sign_pset(
         &self,
-        is_internal: bool,
-        j: u32,
-    ) -> Result<(bool, DerivationPath, BEScript), Error> {
+        request: &gdk_common::model::SignPset,
+    ) -> Result<gdk_common::model::SignedPsetMeta, Error> {
+        if request.subaccount != self.account_num {
+            return Err(Error::InvalidSubaccount(request.subaccount));
+        }
+        sign_pset(self, request)
+    }
+
+    pub fn get_script_batch(&self, is_internal: bool, batch: u32) -> Result<ScriptBatch, Error> {
         let store = self.store.read()?;
         let acc_store = store.account_cache(self.account_num)?;
 
@@ -1674,22 +1685,211 @@ fn blind_tx(account: &Account, tx: &elements::Transaction) -> Result<elements::T
     pset.extract_tx().map_err(Into::into)
 }
 
-fn is_blinded_inner(blinder: &str) -> bool {
-    blinder.chars().any(|c| c != '0')
+fn verify_pset_request_amounts(
+    account: &Account,
+    send_asset: &str,
+    send_amount: u64,
+    recv_asset: &str,
+    recv_amount: u64,
+) -> Result<(elements::AssetId, elements::AssetId), Error> {
+    if !account.network.liquid {
+        return Err(Error::Generic("not implemented".into()));
+    }
+    let send_asset = elements::AssetId::from_str(&send_asset)
+        .map_err(|_| Error::Generic("invalid send_asset value".into()))?;
+    let recv_asset = elements::AssetId::from_str(&recv_asset)
+        .map_err(|_| Error::Generic("invalid recv_asset value".into()))?;
+    if send_asset == recv_asset {
+        return Err(Error::Generic("assets must be different".into()));
+    }
+    if send_amount == 0 || recv_amount == 0 {
+        return Err(Error::Generic("invalid amount, must be positive".into()));
+    }
+    Ok((send_asset, recv_asset))
 }
 
-/// False if both the asset and value blinders are zero.
-///
-/// The partially blinded case, i.e. when one of the two blinders is zero and the other is not, is
-/// interpreted as blinded.
-fn is_blinded(
-    asset_blinder_hex: &Option<String>,
-    amount_blinder_hex: &Option<String>,
-) -> Option<bool> {
-    match (asset_blinder_hex, amount_blinder_hex) {
-        (Some(abf), Some(vbf)) => Some(is_blinded_inner(abf) || is_blinded_inner(vbf)),
-        _ => None,
+pub fn create_pset(
+    account: &Account,
+    request: &gdk_common::model::CreatePset,
+) -> Result<gdk_common::model::PsetMeta, Error> {
+    let (send_asset, _recv_asset) = verify_pset_request_amounts(
+        account,
+        &request.send_asset,
+        request.send_amount,
+        &request.recv_asset,
+        request.recv_amount,
+    )?;
+
+    let unspents = account.unspents()?;
+    let utxos =
+        unspents.iter().map(|outpoint| account.txo(outpoint)).collect::<Result<Vec<_>, _>>()?;
+    let mut asset_utxos: Vec<Txo> = utxos
+        .into_iter()
+        .filter(|utxo| utxo.asset_id() == Some(send_asset) && utxo.txoutsecrets.is_some())
+        .collect();
+    asset_utxos.sort_by_key(|utxo| utxo.satoshi);
+
+    let store_read = account.store.read()?;
+    let acc_store = store_read.account_cache(account.num())?;
+    let mut selected = 0;
+    let mut inputs = Vec::new();
+    while selected < request.send_amount && !asset_utxos.is_empty() {
+        let utxo = asset_utxos.pop().unwrap();
+        selected += utxo.satoshi;
+
+        inputs.push(gdk_common::model::SwapInput {
+            txid: utxo.outpoint.txid().to_string(),
+            vout: utxo.outpoint.vout(),
+            asset: request.send_asset.clone(),
+            value: utxo.satoshi,
+            asset_bf: utxo.txoutsecrets.as_ref().unwrap().asset_bf.to_string(),
+            value_bf: utxo.txoutsecrets.as_ref().unwrap().value_bf.to_string(),
+        });
     }
+    if selected < request.send_amount {
+        return Err(Error::InsufficientFunds);
+    }
+
+    // Drop mutex locks to prevent deadlock later
+    drop(acc_store);
+    drop(store_read);
+
+    let recv_addr = account.get_next_address(false)?.address;
+    let change_addr = account.get_next_address(true)?.address;
+
+    Ok(gdk_common::model::PsetMeta {
+        inputs,
+        recv_addr,
+        change_addr,
+    })
+}
+
+fn verify_recv_output(
+    account: &Account,
+    output: &elements::pset::Output,
+    expected_asset: &elements::AssetId,
+    expected_value: u64,
+) -> Result<(), Error> {
+    let store_read = account.store.read().unwrap();
+    let acc_store = store_read.account_cache(account.account_num).unwrap();
+    let script = elements::Script::from(output.script_pubkey.to_bytes());
+    if acc_store.paths.get(&BEScript::Elements(script.clone())).is_none() {
+        return Err(Error::Generic("unknown output script".into()));
+    }
+
+    let blinding_key = gdk_common::wally::asset_blinding_key_to_ec_private_key(
+        account.master_blinding.as_ref().unwrap(),
+        &script,
+    );
+    let unblinded = output
+        .to_txout()
+        .unblind(&crate::EC, blinding_key)
+        .map_err(|_| Error::Generic("unblind failed".into()))?;
+
+    if *expected_asset != unblinded.asset {
+        return Err(Error::Generic("unexpected asset".to_owned()));
+    }
+    if expected_value != unblinded.value {
+        return Err(Error::Generic("unexpected value".to_owned()));
+    }
+    Ok(())
+}
+
+pub fn sign_pset(
+    account: &Account,
+    request: &gdk_common::model::SignPset,
+) -> Result<gdk_common::model::SignedPsetMeta, Error> {
+    let (send_asset, _recv_asset) = verify_pset_request_amounts(
+        account,
+        &request.send_asset,
+        request.send_amount,
+        &request.recv_asset,
+        request.recv_amount,
+    )?;
+
+    let pset = base64::decode(&request.pset)
+        .map_err(|_| Error::Generic("invalid base64 encoding".into()))?;
+    let mut pset =
+        elements::encode::deserialize::<elements::pset::PartiallySignedTransaction>(&pset)
+            .map_err(|e| Error::Generic(format!("invalid PSET: {}", e)))?;
+
+    let tx = pset
+        .extract_tx()
+        .map_err(|e| Error::Generic(format!("extracting transaction failed: {}", e)))?;
+    let tx = elements::encode::deserialize(&elements::encode::serialize(&tx))?;
+
+    let recv_asset = elements::AssetId::from_str(&request.recv_asset).unwrap();
+    pset.outputs()
+        .iter()
+        .find(|output| {
+            verify_recv_output(account, output, &recv_asset, request.recv_amount).is_ok()
+        })
+        .ok_or_else(|| Error::Generic("no receive output found".to_owned()))?;
+
+    let unspents = account.unspents()?;
+    let utxos =
+        unspents.iter().map(|outpoint| account.txo(outpoint)).collect::<Result<Vec<_>, _>>()?;
+    let asset_utxos: Vec<Txo> = utxos
+        .into_iter()
+        .filter(|utxo| {
+            utxo.asset_id() == Some(send_asset)
+                && utxo.txoutsecrets.is_some()
+                && utxo.txoutcommitments.is_some()
+        })
+        .collect();
+
+    let store_read = account.store.read()?;
+    let acc_store = store_read.account_cache(account.num())?;
+
+    let mut inputs_amount = 0;
+    for (index, input) in pset.inputs_mut().iter_mut().enumerate() {
+        let utxo = asset_utxos.iter().find(|utxo| {
+            utxo.outpoint.txid().ref_elements() == Some(&input.previous_txid)
+                && utxo.outpoint.vout() == input.previous_output_index
+        });
+        if let Some(utxo) = utxo {
+            inputs_amount += utxo.satoshi;
+            let derivation_path = acc_store.get_path(&utxo.script_pubkey.clone().into())?;
+
+            let (script_sig, witness) = internal_sign_elements(
+                &tx,
+                index,
+                account.xprv.as_ref().ok_or_else(|| {
+                    Error::Generic(format!(
+                        "inputs amount ({}) is less than send amount ({})",
+                        inputs_amount, request.send_amount
+                    ))
+                })?,
+                &derivation_path,
+                utxo.txoutcommitments.as_ref().unwrap().1,
+                account.script_type,
+            );
+            let script_sig =
+                elements::encode::deserialize(&elements::encode::serialize(&script_sig)).unwrap();
+            input.final_script_sig = Some(script_sig);
+            input.final_script_witness = Some(witness);
+        }
+    }
+    if inputs_amount < request.send_amount {
+        return Err(Error::Generic(format!(
+            "inputs amount ({}) is less than send amount ({})",
+            inputs_amount, request.send_amount
+        )));
+    }
+
+    let change_amount = inputs_amount - request.send_amount;
+    let send_asset = elements::AssetId::from_str(&request.send_asset).unwrap();
+    if change_amount > 0 {
+        pset.outputs_mut()
+            .iter_mut()
+            .find(|output| verify_recv_output(account, output, &send_asset, change_amount).is_ok())
+            .ok_or_else(|| Error::Generic("no change output found".to_owned()))?;
+    }
+
+    let pset = elements::encode::serialize(&pset);
+    Ok(gdk_common::model::SignedPsetMeta {
+        pset: base64::encode(&pset),
+    })
 }
 
 #[cfg(test)]

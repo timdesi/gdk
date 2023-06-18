@@ -3362,6 +3362,16 @@ namespace sdk {
         return txhash_hex;
     }
 
+    nlohmann::json ga_session::create_pset(const nlohmann::json& /*details*/)
+    {
+        return nlohmann::json{ "not implemented" };
+    }
+
+    nlohmann::json ga_session::sign_pset(const nlohmann::json& /*details*/)
+    {
+        return nlohmann::json{ "not implemented" };
+    }
+
     // Idempotent
     void ga_session::send_nlocktimes()
     {
