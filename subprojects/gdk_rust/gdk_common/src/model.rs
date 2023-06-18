@@ -153,6 +153,47 @@ pub struct CreateTransaction {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CreatePset {
+    pub subaccount: u32,
+    pub send_asset: String,
+    pub send_amount: u64,
+    pub recv_asset: String,
+    pub recv_amount: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SwapInput {
+    pub txid: String,
+    pub vout: u32,
+    pub asset: String,
+    pub asset_bf: String,
+    pub value: u64,
+    pub value_bf: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PsetMeta {
+    pub inputs: Vec<SwapInput>,
+    pub recv_addr: String,
+    pub change_addr: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct SignPset {
+    pub subaccount: u32,
+    pub send_asset: String,
+    pub send_amount: u64,
+    pub recv_asset: String,
+    pub recv_amount: u64,
+    pub pset: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct SignedPsetMeta {
+    pub pset: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct GetTransactionsOpt {
     pub first: usize,
     pub count: usize,
@@ -598,6 +639,8 @@ pub struct TxListItem {
     pub type_: TransactionType,
     pub memo: String,
     pub txhash: String,
+    // Disable to be able detect swap transactions
+    //#[serde(serialize_with = "serialize_tx_balances")]
     pub satoshi: Balances,
     pub rbf_optin: bool,
     pub can_cpfp: bool,

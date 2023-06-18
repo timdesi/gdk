@@ -968,60 +968,42 @@ namespace sdk {
     }
 
     //
-    // Blind transaction
+    // Create PSET
     //
-    blind_transaction_call::blind_transaction_call(session& session, nlohmann::json details)
-        : auth_handler_impl(session, "blind_transaction")
-        , m_details(std::move(details))
+    create_pset_call::create_pset_call(session& session, const nlohmann::json& details)
+        : auth_handler_impl(session, "create_pset")
+        , m_details(details)
     {
     }
 
-    auth_handler::state_type blind_transaction_call::call_impl()
+    auth_handler::state_type create_pset_call::call_impl()
     {
-        if (!m_details.empty()) {
-            m_details.erase("utxos"); // Not needed for blinding
-        }
-        const bool is_liquid = m_net_params.is_liquid();
-
-        if (!is_liquid || !json_get_value(m_details, "error").empty()
-            || json_get_value(m_details, "is_blinded", false)) {
-            // Already blinded, or non-Liquid network: return the details as-is
-            m_result = std::move(m_details);
-            return state_type::done;
+        if (m_result.empty()) {
+            // Initial call: Create PSET from the provided details
+            m_result = m_session->create_pset(m_details);
+            m_state = state_type::done;
         }
 
-        if (m_hw_request == hw_request::get_blinding_factors) {
-            // HWW has returned the blinding factors, blind the tx
-            // For txs containing AMP v1 inputs, ask the HWW to return the
-            // nonces the service requires.
-            m_details["blinding_nonces_required"] = tx_has_amp_inputs(*m_session, m_details);
-            blind_ga_transaction(*m_session, m_details, get_hw_reply());
-            m_details.erase("blinding_nonces_required");
-            m_result = std::move(m_details);
-            return state_type::done;
+        return m_state;
+    }
+
+    //
+    // Sign PSET
+    //
+    sign_pset_call::sign_pset_call(session& session, const nlohmann::json& details)
+        : auth_handler_impl(session, "sign_pset")
+        , m_details(details)
+    {
+    }
+
+    auth_handler::state_type sign_pset_call::call_impl()
+    {
+        if (m_result.empty()) {
+            // Initial call: Sign the PSET from the provided details
+            m_result = m_session->sign_pset(m_details);
+            m_state = state_type::done;
         }
 
-        // Ask the HWW for the blinding factors to blind the tx
-        signal_hw_request(hw_request::get_blinding_factors);
-        nlohmann::json::array_t utxos;
-        const auto& used_utxos = m_details["used_utxos"];
-        utxos.reserve(used_utxos.size());
-        for (const auto& u : used_utxos) {
-            nlohmann::json prevout = { { "txhash", u.at("txhash") }, { "pt_idx", u.at("pt_idx") } };
-            utxos.emplace_back(std::move(prevout));
-        }
-        m_twofactor_data["used_utxos"] = std::move(utxos);
-        const bool is_partial = json_get_value(m_details, "is_partial", false);
-        m_twofactor_data["is_partial"] = is_partial;
-        GDK_RUNTIME_ASSERT(is_partial || m_details["transaction_outputs"].size() >= 2);
-        auto& outputs = m_twofactor_data["transaction_outputs"];
-        outputs = m_details["transaction_outputs"];
-        if (!is_partial) {
-            // Remove the fee output for non-partial txs
-            GDK_RUNTIME_ASSERT(!outputs.empty());
-            GDK_RUNTIME_ASSERT(outputs.back().value("is_fee", false));
-            outputs.erase(outputs.size() - 1);
-        }
         return m_state;
     }
 

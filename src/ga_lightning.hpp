@@ -4,10 +4,10 @@
 
 namespace ga {
 namespace sdk {
-    class ga_rust final : public session_impl {
+    class ga_lightning final : public session_impl {
     public:
-        explicit ga_rust(network_parameters&& net_params);
-        ~ga_rust();
+        explicit ga_lightning(network_parameters&& net_params);
+        ~ga_lightning();
 
         void reconnect();
         void reconnect_hint(const nlohmann::json& hint);
@@ -32,26 +32,14 @@ namespace sdk {
         uint32_t get_next_subaccount(const std::string& type);
         nlohmann::json create_subaccount(const nlohmann::json& details, uint32_t subaccount, const std::string& xpub);
 
-        // Get the master blinding key from the rust cache if available.
-        // If the master blinding key is missing,
-        // The caller should obtain it from the signer and set it with
-        // set_cached_master_blinding_key
         std::pair<std::string, bool> get_cached_master_blinding_key();
 
-        // Set the master blinding key in the rust cache.
-        // If the cache has already a master blinding key,
-        // attempting to set a different key results in an error.
         void set_cached_master_blinding_key(const std::string& master_blinding_key_hex);
 
-        // Start the rust sync threads.
-        // This must be done once the store is loaded
-        // and for liquid after the master blinding key is set.
         void start_sync_threads();
-
-        // Get the subaccount pointers for the subaccount that belongs to the wallet.
-        // For each of these subaccounts, the caller should set the xpub with
-        // create_subaccount if the xpub missing from the store.
         std::vector<uint32_t> get_subaccount_pointers();
+
+        nlohmann::json get_subaccount_xpub(uint32_t subaccount);
 
         void change_settings_limits(const nlohmann::json& limit_details, const nlohmann::json& twofactor_data);
         nlohmann::json get_transactions(const nlohmann::json& details);
@@ -70,7 +58,7 @@ namespace sdk {
         bool is_rbf_enabled() const;
         bool is_watch_only() const;
         void ensure_full_session();
-        nlohmann::json get_settings() const;
+        nlohmann::json get_settings();
         nlohmann::json get_post_login_data();
         void change_settings(const nlohmann::json& settings);
 
@@ -98,7 +86,6 @@ namespace sdk {
         nlohmann::json cancel_twofactor_reset(const nlohmann::json& twofactor_data);
 
         nlohmann::json encrypt_with_pin(const nlohmann::json& details);
-        nlohmann::json decrypt_with_pin(const nlohmann::json& details);
 
         nlohmann::json get_unspent_outputs(const nlohmann::json& details, unique_pubkeys_and_scripts_t& missing);
         nlohmann::json get_unspent_outputs_for_private_key(
@@ -107,8 +94,10 @@ namespace sdk {
         wally_tx_ptr get_raw_transaction_details(const std::string& txhash_hex) const;
         nlohmann::json get_transaction_details(const std::string& txhash_hex) const;
 
+        nlohmann::json create_transaction(const nlohmann::json& details);
+        nlohmann::json user_sign_transaction(const nlohmann::json& details);
         nlohmann::json service_sign_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data);
-        nlohmann::json get_scriptpubkey_data(byte_span_t scriptpubkey);
+        nlohmann::json psbt_sign(const nlohmann::json& details);
         nlohmann::json send_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data);
         std::string broadcast_transaction(const std::string& tx_hex);
 
@@ -134,6 +123,7 @@ namespace sdk {
         amount get_min_fee_rate() const;
         amount get_default_fee_rate() const;
         uint32_t get_block_height() const;
+        amount get_dust_threshold() const;
         nlohmann::json get_spending_limits() const;
         bool is_spending_limits_decrease(const nlohmann::json& limit_details);
         void set_local_encryption_keys(const pub_key_t& public_key, std::shared_ptr<signer> signer);
@@ -143,7 +133,7 @@ namespace sdk {
 
         void disable_all_pin_logins();
 
-        nlohmann::json get_address_data(const nlohmann::json& details);
+        nlohmann::json gl_call(const char* method, const nlohmann::json& params);
 
     private:
         static void GDKRUST_notif_handler(void* self_context, char* json);
