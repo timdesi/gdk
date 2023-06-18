@@ -1,23 +1,25 @@
-use crate::determine_electrum_url;
 use crate::error::Error;
 use crate::headers::bitcoin::{HeadersChain, HEADERS_FILE_MUTEX};
 use crate::headers::liquid::Verifier;
-use ::bitcoin::hashes::hex::ToHex;
-use ::bitcoin::hashes::{sha256, sha256d, Hash};
-use aes_gcm_siv::aead::{Aead, NewAead};
-use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce};
+use crate::session::determine_electrum_url;
 use electrum_client::{Client, ElectrumApi, GetMerkleRes};
+use gdk_common::aes::aead::NewAead;
+use gdk_common::aes::{Aes256GcmSiv, Key};
 use gdk_common::be::{BETxid, BETxidConvert};
+use gdk_common::bitcoin::hashes::hex::ToHex;
+use gdk_common::bitcoin::hashes::{sha256, sha256d, Hash};
+use gdk_common::electrum_client;
+use gdk_common::elements;
+use gdk_common::log::{debug, info, warn};
 use gdk_common::model::{
     SPVCommonParams, SPVDownloadHeadersParams, SPVDownloadHeadersResult, SPVVerifyTxParams,
     SPVVerifyTxResult,
 };
+use gdk_common::store::{Decryptable, Encryptable};
 use gdk_common::NetworkId;
-use log::{debug, info, warn};
-use rand::{thread_rng, Rng};
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub mod bitcoin;
@@ -61,7 +63,7 @@ trait ParamsMethods {
     fn build_client(&self) -> Result<Client, Error>;
     fn headers_chain(&self) -> Result<HeadersChain, Error>;
     fn verified_cache(&self) -> Result<VerifiedCache, Error>;
-    fn bitcoin_network(&self) -> Option<::bitcoin::Network>;
+    fn bitcoin_network(&self) -> Option<gdk_common::bitcoin::Network>;
 }
 
 impl ParamsMethods for SPVCommonParams {
@@ -76,7 +78,7 @@ impl ParamsMethods for SPVCommonParams {
     fn verified_cache(&self) -> Result<VerifiedCache, Error> {
         Ok(VerifiedCache::new(&self.network.state_dir, self.network.id(), &self.encryption_key))
     }
-    fn bitcoin_network(&self) -> Option<::bitcoin::Network> {
+    fn bitcoin_network(&self) -> Option<gdk_common::bitcoin::Network> {
         self.network.id().get_bitcoin_network()
     }
 }
@@ -244,12 +246,7 @@ impl VerifiedCache {
         cipher: &Aes256GcmSiv,
     ) -> Result<HashSet<(BETxid, u32)>, Error> {
         let mut file = File::open(&filepath)?;
-        let mut nonce_bytes = [0u8; 12]; // 96 bits
-        file.read_exact(&mut nonce_bytes)?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
-        let mut ciphertext = vec![];
-        file.read_to_end(&mut ciphertext)?;
-        let plaintext = cipher.decrypt(nonce, ciphertext.as_ref())?;
+        let plaintext = file.decrypt(cipher)?;
         Ok(serde_cbor::from_slice(&plaintext)?)
     }
 
@@ -270,14 +267,11 @@ impl VerifiedCache {
 
     fn flush(&mut self) -> Result<(), Error> {
         if let Some(store) = &self.store {
-            let mut file = File::create(&store.filepath)?;
-            let mut nonce_bytes = [0u8; 12]; // 96 bits
-            thread_rng().fill(&mut nonce_bytes);
             let plaintext = serde_cbor::to_vec(&self.set)?;
-            let nonce = Nonce::from_slice(&nonce_bytes);
-            let ciphertext = store.cipher.encrypt(nonce, plaintext.as_ref())?;
-            file.write(&nonce)?;
-            file.write(&ciphertext)?;
+            let (nonce_bytes, ciphertext) = plaintext.encrypt(&store.cipher)?;
+            let mut file = File::create(&store.filepath)?;
+            file.write_all(&nonce_bytes)?;
+            file.write_all(&ciphertext)?;
         }
 
         Ok(())

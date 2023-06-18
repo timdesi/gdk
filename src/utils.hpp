@@ -7,9 +7,8 @@
 
 #include "containers.hpp"
 #include "ga_wally.hpp"
-#include "include/gdk.h"
+#include "gdk.h"
 #include "logging.hpp"
-#include "threading.hpp"
 
 namespace ga {
 namespace sdk {
@@ -30,7 +29,7 @@ namespace sdk {
     // STL compatible RNG returning uniform uint32_t's
     struct uniform_uint32_rng {
         uniform_uint32_rng() // NOLINT: ignored for valgrind use
-            : m_index(m_entropy.size() - 1u)
+            : m_index(std::tuple_size<decltype(m_entropy)>::value - 1u)
         {
         }
 
@@ -55,6 +54,7 @@ namespace sdk {
     }
 
     bool nsee_log_info(std::string message, const char* context);
+    std::string get_diagnostic_information(const boost::exception& e);
 
     template <typename F> bool no_std_exception_escape(F&& fn, const char* context = "") noexcept
     {
@@ -64,7 +64,7 @@ namespace sdk {
             return false;
         } catch (const boost::exception& e) {
             try {
-                message = diagnostic_information(e);
+                message = get_diagnostic_information(e);
             } catch (const std::exception&) {
             }
         } catch (const std::exception& e) {
@@ -76,7 +76,13 @@ namespace sdk {
         return nsee_log_info(message, context);
     }
 
-    nlohmann::json parse_bitcoin_uri(const std::string& uri, const std::string& expected_scheme);
+    // Returns the 32 byte asset id in hex, or "btc" for bitcoin
+    std::string asset_id_from_json(
+        const network_parameters& net_params, const nlohmann::json& json, const std::string& key = "asset_id");
+
+    // Parse a BIP-21 style URI into its components
+    // If the uri passed is not a bitcoin uri returns an empty json object
+    nlohmann::json parse_bitcoin_uri(const network_parameters& net_params, const std::string& uri);
 
     nlohmann::json parse_url(const std::string& url);
     nlohmann::json select_url(const std::vector<nlohmann::json>& urls, bool use_tor);
@@ -124,17 +130,17 @@ namespace sdk {
     // Return decompressed `bytes` (prefix is assumed removed by the caller)
     std::vector<unsigned char> decompress(byte_span_t bytes);
 
-    std::string get_wallet_hash_id(
+    std::string get_wallet_hash_id(const std::string& chain_code_hex, const std::string& public_key_hex,
+        bool is_mainnet, const std::string& network);
+    nlohmann::json get_wallet_hash_ids(
         const network_parameters& net_params, const std::string& chain_code_hex, const std::string& public_key_hex);
-    nlohmann::json get_wallet_hash_id(const nlohmann::json& net_params, const nlohmann::json& params);
+    nlohmann::json get_wallet_hash_ids(const nlohmann::json& net_params, const nlohmann::json& params);
 
     // RUST FFI:
     // GA_init for rust
-    // No-op if rust support is not compiled in
     void init_rust(const nlohmann::json& details);
 
     // Make a call into rust code and return the result
-    // Throws if rust support is not compiled in
     nlohmann::json rust_call(const std::string& method, const nlohmann::json& input, void* session = nullptr);
 
     // Return the SPV verification status of a tx
@@ -144,13 +150,10 @@ namespace sdk {
     // "in_progress", "verified", "not_verified", "disabled", "not_longest", "unconfirmed"
     std::string spv_get_status_string(uint32_t spv_status);
 
-    // Extract the transaction from a PSBT or PSET
-    std::string psbt_extract_tx(const std::string& psbt);
-
-    // Merge a transaction in a PSBT or PSET
-    std::string psbt_merge_tx(const std::string& psbt, const std::string& tx_hex);
-
     std::string gdb_dump_json(const nlohmann::json& json);
+
+    // Check if str represents a valid utf-8 string
+    bool is_valid_utf8(const std::string& str);
 } // namespace sdk
 } // namespace ga
 

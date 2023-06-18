@@ -9,9 +9,11 @@
 #include <vector>
 
 #include "gsl_wrapper.hpp"
-#include "include/wally_wrapper.h"
+#include "wally_wrapper.h"
 
 #include "assertion.hpp"
+
+#define SIGHASH_SINGLE_ANYONECANPAY (WALLY_SIGHASH_SINGLE | WALLY_SIGHASH_ANYONECANPAY)
 
 namespace std {
 template <> struct default_delete<struct ext_key> {
@@ -42,12 +44,15 @@ namespace sdk {
     using wally_tx_witness_stack_ptr = std::unique_ptr<struct wally_tx_witness_stack>;
     using wally_tx_output_ptr = std::unique_ptr<struct wally_tx_output>;
     using wally_tx_ptr = std::unique_ptr<struct wally_tx>;
+    using wally_psbt_ptr = std::unique_ptr<struct wally_psbt>;
 
     using byte_span_t = gsl::span<const unsigned char>;
     using uint32_span_t = gsl::span<const uint32_t>;
     using uint64_span_t = gsl::span<const uint64_t>;
 
     using ecdsa_sig_t = std::array<unsigned char, EC_SIGNATURE_LEN>;
+    using ecdsa_sig_rec_t = std::array<unsigned char, EC_SIGNATURE_RECOVERABLE_LEN>;
+    using sig_and_sighash_t = std::pair<ecdsa_sig_t, uint32_t>;
     using chain_code_t = std::array<unsigned char, 32>;
     using pbkdf2_hmac256_t = std::array<unsigned char, PBKDF2_HMAC_SHA256_LEN>;
     using pbkdf2_hmac512_t = std::array<unsigned char, PBKDF2_HMAC_SHA512_LEN>;
@@ -58,6 +63,7 @@ namespace sdk {
     using asset_id_t = std::array<unsigned char, ASSET_TAG_LEN>;
     using vbf_t = std::array<unsigned char, 32>;
     using abf_t = std::array<unsigned char, 32>;
+    using abf_vbf_t = std::array<unsigned char, WALLY_ABF_VBF_LEN>;
     using unblind_t = std::tuple<asset_id_t, vbf_t, abf_t, uint64_t>;
     using cvalue_t = std::array<unsigned char, WALLY_TX_ASSET_CT_VALUE_UNBLIND_LEN>;
     using blinding_key_t = std::array<unsigned char, HMAC_SHA512_LEN>;
@@ -117,6 +123,14 @@ namespace sdk {
     wally_ext_key_ptr bip32_key_from_seed_alloc(
         byte_span_t seed, uint32_t version, uint32_t flags = BIP32_FLAG_SKIP_HASH);
 
+    xpub_t make_xpub(const ext_key* hdkey);
+    xpub_t make_xpub(const std::string& chain_code_hex, const std::string& public_key_hex);
+    xpub_t make_xpub(const std::string& bip32_xpub);
+    std::string bip32_key_to_base58(const struct ext_key* hdkey, uint32_t flags);
+
+    constexpr uint32_t harden(uint32_t pointer) { return pointer | 0x80000000; }
+    constexpr uint32_t unharden(uint32_t pointer) { return pointer & 0x7fffffff; }
+
     // BIP 38
     std::vector<unsigned char> bip38_raw_to_private_key(byte_span_t priv_key, byte_span_t passphrase, uint32_t flags);
 
@@ -135,16 +149,15 @@ namespace sdk {
     void scriptpubkey_csv_2of2_then_1_from_bytes(
         byte_span_t keys, uint32_t csv_blocks, bool optimize, std::vector<unsigned char>& out);
 
-    void scriptpubkey_csv_2of3_then_2_from_bytes(
-        byte_span_t keys, uint32_t csv_blocks, std::vector<unsigned char>& out);
-
     uint32_t get_csv_blocks_from_csv_redeem_script(byte_span_t redeem_script);
 
-    ecdsa_sig_t get_sig_from_p2pkh_script_sig(byte_span_t script_sig);
+    sig_and_sighash_t get_sig_from_p2pkh_script_sig(byte_span_t script_sig);
 
-    std::vector<ecdsa_sig_t> get_sigs_from_multisig_script_sig(byte_span_t script_sig);
+    std::vector<sig_and_sighash_t> get_sigs_from_multisig_script_sig(byte_span_t script_sig);
 
     void scriptpubkey_multisig_from_bytes(byte_span_t keys, uint32_t threshold, std::vector<unsigned char>& out);
+
+    size_t varbuff_get_length(size_t script_len);
 
     std::vector<unsigned char> script_push_from_bytes(byte_span_t data);
 
@@ -154,6 +167,8 @@ namespace sdk {
     std::vector<unsigned char> scriptpubkey_p2sh_from_hash160(byte_span_t hash);
 
     std::vector<unsigned char> scriptpubkey_p2sh_p2wsh_from_bytes(byte_span_t script);
+
+    uint32_t scriptpubkey_get_type(byte_span_t scriptpubkey);
 
     std::vector<unsigned char> witness_program_from_bytes(byte_span_t script, uint32_t witness_ver, uint32_t flags);
 
@@ -228,6 +243,8 @@ namespace sdk {
 
     std::string base58check_from_bytes(byte_span_t data);
 
+    bool validate_base58check(const std::string& base58);
+
     std::vector<unsigned char> base58check_to_bytes(const std::string& base58);
 
     wally_string_ptr base64_string_from_bytes(byte_span_t bytes);
@@ -246,13 +263,16 @@ namespace sdk {
     ecdsa_sig_t ec_sig_from_bytes(
         byte_span_t private_key, byte_span_t hash, uint32_t flags = EC_FLAG_ECDSA | EC_FLAG_GRIND_R);
 
-    std::vector<unsigned char> ec_sig_to_der(byte_span_t sig, bool sighash = false);
+    ecdsa_sig_rec_t ec_sig_rec_from_bytes(
+        byte_span_t private_key, byte_span_t hash, uint32_t flags = EC_FLAG_ECDSA | EC_FLAG_RECOVERABLE);
+
+    std::vector<unsigned char> ec_sig_to_der(byte_span_t sig, uint32_t sighash = WALLY_SIGHASH_ALL);
     ecdsa_sig_t ec_sig_from_der(byte_span_t der, bool sighash = false);
 
     bool ec_sig_verify(
         byte_span_t public_key, byte_span_t message_hash, byte_span_t sig, uint32_t flags = EC_FLAG_ECDSA);
 
-    inline auto sig_to_der_hex(const ecdsa_sig_t& signature) { return b2h(ec_sig_to_der(signature)); }
+    std::string sig_only_to_der_hex(const ecdsa_sig_t& signature);
 
     std::vector<unsigned char> ec_public_key_from_private_key(byte_span_t private_key);
 
@@ -265,12 +285,19 @@ namespace sdk {
 
     std::pair<priv_key_t, std::vector<unsigned char>> get_ephemeral_keypair();
 
-    std::vector<unsigned char> ecdh(byte_span_t public_key, byte_span_t private_key);
+    std::array<unsigned char, SHA256_LEN> ecdh(byte_span_t public_key, byte_span_t private_key);
 
-    std::vector<unsigned char> ae_host_commit_from_bytes(byte_span_t entropy, uint32_t flags = EC_FLAG_ECDSA);
+    std::array<unsigned char, WALLY_HOST_COMMITMENT_LEN> ae_host_commit_from_bytes(
+        byte_span_t entropy, uint32_t flags = EC_FLAG_ECDSA);
 
     bool ae_verify(byte_span_t public_key, byte_span_t message_hash, byte_span_t host_entropy,
         byte_span_t signer_commitment, byte_span_t sig, uint32_t flags = EC_FLAG_ECDSA);
+
+    bool ec_scalar_verify(byte_span_t scalar);
+
+    std::array<unsigned char, EC_SCALAR_LEN> ec_scalar_add(byte_span_t a, byte_span_t b);
+
+    std::array<unsigned char, EC_SCALAR_LEN> ec_scalar_subtract(byte_span_t a, byte_span_t b);
 
     //
     // Elements
@@ -280,12 +307,22 @@ namespace sdk {
     std::array<unsigned char, ASSET_TAG_LEN> asset_final_vbf(
         uint64_span_t values, size_t num_inputs, byte_span_t abf, byte_span_t vbf);
 
+    std::array<unsigned char, EC_SCALAR_LEN> asset_scalar_offset(uint64_t value, byte_span_t abf, byte_span_t vbf);
+
     std::array<unsigned char, ASSET_COMMITMENT_LEN> asset_value_commitment(
         uint64_t value, byte_span_t vbf, byte_span_t generator);
 
     std::vector<unsigned char> asset_rangeproof(uint64_t value, byte_span_t public_key, byte_span_t private_key,
         byte_span_t asset, byte_span_t abf, byte_span_t vbf, byte_span_t commitment, byte_span_t extra,
-        byte_span_t generator, uint64_t min_value, int exp, int min_bits);
+        byte_span_t generator, uint64_t min_value = 1, int exp = 0, int min_bits = 52);
+
+    size_t asset_rangeproof_max_size(uint64_t value, int min_bits = 52);
+
+    std::vector<unsigned char> explicit_rangeproof(
+        uint64_t value, byte_span_t nonce_hash, byte_span_t vbf, byte_span_t commitment, byte_span_t generator);
+
+    bool explicit_rangeproof_verify(
+        byte_span_t rangeproof, uint64_t value, byte_span_t commitment, byte_span_t generator);
 
     size_t asset_surjectionproof_size(size_t num_inputs);
 
@@ -298,6 +335,7 @@ namespace sdk {
     unblind_t asset_unblind_with_nonce(byte_span_t blinding_nonce, byte_span_t rangeproof, byte_span_t commitment,
         byte_span_t extra_commitment, byte_span_t generator);
 
+    bool is_possible_confidential_addr(const std::string& address);
     std::string confidential_addr_to_addr(const std::string& address, uint32_t prefix);
     std::string confidential_addr_to_addr_segwit(
         const std::string& address, const std::string& confidential_prefix, const std::string& family);
@@ -315,6 +353,8 @@ namespace sdk {
 
     priv_key_t asset_blinding_key_to_ec_private_key(byte_span_t blinding_key, byte_span_t script);
 
+    abf_vbf_t asset_blinding_key_to_abf_vbf(byte_span_t blinding_key, byte_span_t hash_prevouts, uint32_t output_index);
+
     //
     // Transactions
     //
@@ -329,8 +369,8 @@ namespace sdk {
 
     void tx_add_raw_output(const wally_tx_ptr& tx, uint64_t satoshi, byte_span_t script);
 
-    void tx_add_elements_raw_output(const wally_tx_ptr& tx, byte_span_t script, byte_span_t asset, byte_span_t value,
-        byte_span_t nonce, byte_span_t surjectionproof, byte_span_t rangeproof);
+    void tx_add_elements_raw_output_at(const wally_tx_ptr& tx, size_t index, byte_span_t script, byte_span_t asset,
+        byte_span_t value, byte_span_t nonce, byte_span_t surjectionproof, byte_span_t rangeproof);
 
     void tx_elements_output_commitment_set(const wally_tx_ptr& tx, size_t index, byte_span_t asset, byte_span_t value,
         byte_span_t nonce, byte_span_t surjectionproof, byte_span_t rangeproof);
@@ -356,6 +396,8 @@ namespace sdk {
 
     GA_USE_RESULT size_t tx_get_weight(const wally_tx_ptr& tx);
 
+    std::array<unsigned char, SHA256_LEN> get_hash_prevouts(byte_span_t txids, uint32_span_t output_indices);
+
     void tx_set_input_script(const wally_tx_ptr& tx, size_t index, byte_span_t script);
 
     void tx_set_input_witness(const wally_tx_ptr& tx, size_t index, const wally_tx_witness_stack_ptr& witness);
@@ -372,13 +414,16 @@ namespace sdk {
 
     uint64_t tx_confidential_value_to_satoshi(byte_span_t ct_value);
 
-    xpub_t make_xpub(const ext_key* hdkey);
-    xpub_t make_xpub(const std::string& chain_code_hex, const std::string& public_key_hex);
-    xpub_t make_xpub(const std::string& bip32_xpub);
-    std::string bip32_key_to_base58(const struct ext_key* hdkey, uint32_t flags);
+    //
+    // PSBT/PSET
+    //
+    wally_psbt_ptr psbt_from_base64(const std::string& b64);
 
-    constexpr uint32_t harden(uint32_t pointer) { return pointer | 0x80000000; }
-    constexpr uint32_t unharden(uint32_t pointer) { return pointer & 0x7fffffff; }
+    std::string psbt_to_base64(const wally_psbt_ptr& psbt, uint32_t flags = 0);
+
+    wally_tx_ptr psbt_extract_tx(const wally_psbt_ptr& psbt);
+
+    std::vector<unsigned char> psbt_get_input_redeem_script(const wally_psbt_ptr& psbt, size_t index);
 
 #undef GA_USE_RESULT
 

@@ -1,3 +1,11 @@
+#if defined _WIN32 || defined WIN32 || defined __CYGWIN__
+// workaround https://sourceforge.net/p/mingw-w64/bugs/903/
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+
+#include "bcrypt.h"
+#endif
+
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -8,6 +16,17 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <thread>
+
+#include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/erase.hpp>
+#include <boost/algorithm/string/join.hpp>
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/trim.hpp>
+#include <boost/exception/diagnostic_information.hpp>
+#include <nlohmann/json.hpp>
 
 #ifdef __x86_64
 #include <x86intrin.h>
@@ -15,30 +34,27 @@
 
 #include <openssl/rand.h>
 
-#include "boost_wrapper.hpp"
-
-#include "../subprojects/gdk_rust/gdk_rust.h"
 #include "assertion.hpp"
 #include "exception.hpp"
 #include "ga_strings.hpp"
 #include "ga_wally.hpp"
+#include "gdk_rust.h"
 #include "gsl_wrapper.hpp"
 #include "memory.hpp"
 #include "signer.hpp"
 #include "utils.hpp"
 #include "xpub_hdkey.hpp"
 #include <openssl/evp.h>
-#include <zlib/zlib.h>
-
-#if defined _WIN32 || defined WIN32 || defined __CYGWIN__
-#include "bcrypt.h"
-#endif
+#include <zlib.h>
 
 namespace ga {
 namespace sdk {
 
     // from bitcoin core
     namespace {
+        // Dummy network to use for computing xpub_hash_id
+        static const std::string XPUB_HASH_NETWORK("GREEN_XPUB_HASH_NETWORK");
+
         inline int64_t GetPerformanceCounter()
         {
             // Read the hardware time stamp counter when available.
@@ -262,21 +278,6 @@ namespace sdk {
         return SPV_STATUS_NAMES[spv_status];
     }
 
-    std::string psbt_extract_tx(const std::string& psbt)
-    {
-        auto psbt_hex = b2h(base64_to_bytes(psbt));
-        nlohmann::json details = { { "psbt_hex", std::move(psbt_hex) } };
-        return rust_call("psbt_extract_tx", details).at("transaction");
-    }
-
-    std::string psbt_merge_tx(const std::string& psbt, const std::string& tx_hex)
-    {
-        auto psbt_hex = b2h(base64_to_bytes(psbt));
-        nlohmann::json details = { { "psbt_hex", std::move(psbt_hex) }, { "transaction", tx_hex } };
-        auto result = rust_call("psbt_merge_tx", details);
-        return base64_from_bytes(h2b(result.at("psbt_hex")));
-    }
-
     uint32_t get_uniform_uint32_t(uint32_t upper_bound)
     {
         // Algorithm from the PCG family of random generators
@@ -404,9 +405,25 @@ namespace sdk {
         return encryption_key;
     }
 
-    // Parse a bitcoin uri as described in bip21/72 and return the components
-    // If the uri passed is not a bitcoin uri return a null json object.
-    nlohmann::json parse_bitcoin_uri(const std::string& uri, const std::string& expected_scheme)
+    std::string asset_id_from_json(
+        const network_parameters& net_params, const nlohmann::json& json, const std::string& key)
+    {
+        const std::string asset_id_hex = json_get_value(json, key);
+        const bool is_empty = asset_id_hex.empty();
+        if (net_params.is_liquid()) {
+            if (is_empty || !validate_hex(asset_id_hex, ASSET_TAG_LEN)) {
+                // Must be a valid hex asset id
+                throw user_error(res::id_invalid_asset_id);
+            }
+            return asset_id_hex;
+        }
+        if (!is_empty) {
+            throw user_error(res::id_assets_cannot_be_used_on_bitcoin);
+        }
+        return "btc";
+    }
+
+    nlohmann::json parse_bitcoin_uri(const network_parameters& net_params, const std::string& uri)
     {
         // Split a string into a head and tail around the first (leftmost) occurrence
         // of delimiter and return the tuple (head, tail). If delimiter does not occur
@@ -420,20 +437,14 @@ namespace sdk {
         // TODO: Take either the label or message and set the tx memo field with it if not set
         // FIXME: URL unescape the arguments before returning
         //
-        std::string uri_copy = uri;
-        boost::trim(uri_copy);
-        nlohmann::json parsed;
         std::string scheme, tail;
-        std::tie(scheme, tail) = split(uri_copy, ':');
+        std::tie(scheme, tail) = split(boost::trim_copy(uri), ':');
 
-        boost::algorithm::to_lower(scheme);
-        if (scheme == expected_scheme) {
-            parsed["scheme"] = scheme;
-
+        if (boost::to_lower_copy(scheme) == net_params.bip21_prefix()) {
             std::string address;
             std::tie(address, tail) = split(tail, '?');
-            if (!address.empty()) {
-                parsed["address"] = address;
+            if (address.empty()) {
+                throw user_error(res::id_invalid_address);
             }
             nlohmann::json params;
             while (!tail.empty()) {
@@ -445,16 +456,22 @@ namespace sdk {
                 }
                 params.emplace(key, value);
             }
-            parsed["bip21-params"] = params;
 
-            // always treat the asset_id as lowercase
-            if (parsed["bip21-params"].contains("assetid")) {
-                parsed["bip21-params"]["assetid"]
-                    = boost::algorithm::to_lower_copy(parsed["bip21-params"]["assetid"].get<std::string>());
+            if (params.contains("assetid")) {
+                // Lowercase and validate the asset id
+                params["assetid"] = boost::to_lower_copy(json_get_value(params, "assetid"));
+                asset_id_from_json(net_params, params, "assetid"); // Validate it
+            } else if (net_params.is_liquid() && params.contains("amount")) {
+                // Asset id is mandatory if an amount is present
+                throw user_error(res::id_invalid_payment_request_assetid);
             }
+
+            // Valid. Convert the URI to its address and return the
+            // asset id and amount in "bip21-params".
+            return { { "address", std::move(address) }, { "bip21-params", std::move(params) } };
         }
 
-        return parsed;
+        return {};
     }
 
     // Lookup key in json and if present decode it as hex and return the bytes, if not present
@@ -712,16 +729,25 @@ namespace sdk {
         return n + n_final;
     }
 
-    std::string get_wallet_hash_id(
-        const network_parameters& net_params, const std::string& chain_code_hex, const std::string& public_key_hex)
+    std::string get_wallet_hash_id(const std::string& chain_code_hex, const std::string& public_key_hex,
+        bool is_mainnet, const std::string& network)
     {
         const chain_code_t main_chaincode{ h2b_array<32>(chain_code_hex) };
         const pub_key_t main_pubkey{ h2b_array<EC_PUBLIC_KEY_LEN>(public_key_hex) };
-        const xpub_hdkey main_hdkey(net_params.is_main_net(), std::make_pair(main_chaincode, main_pubkey));
-        return main_hdkey.to_hashed_identifier(net_params.network());
+        const xpub_hdkey main_hdkey(is_mainnet, std::make_pair(main_chaincode, main_pubkey));
+        return main_hdkey.to_hashed_identifier(network);
     }
 
-    nlohmann::json get_wallet_hash_id(const nlohmann::json& net_params, const nlohmann::json& params)
+    nlohmann::json get_wallet_hash_ids(
+        const network_parameters& net_params, const std::string& chain_code_hex, const std::string& public_key_hex)
+    {
+        auto wallet_hash_id
+            = get_wallet_hash_id(chain_code_hex, public_key_hex, net_params.is_main_net(), net_params.network());
+        auto xpub_hash_id = get_wallet_hash_id(chain_code_hex, public_key_hex, false, XPUB_HASH_NETWORK);
+        return { { "wallet_hash_id", std::move(wallet_hash_id) }, { "xpub_hash_id", std::move(xpub_hash_id) } };
+    }
+
+    nlohmann::json get_wallet_hash_ids(const nlohmann::json& net_params, const nlohmann::json& params)
     {
         auto defaults = network_parameters::get(net_params.value("name", std::string()));
         const network_parameters np{ net_params, defaults };
@@ -748,7 +774,7 @@ namespace sdk {
         if (chain_code_hex.empty() || public_key_hex.empty()) {
             throw user_error("Invalid credentials");
         }
-        return { { "wallet_hash_id", get_wallet_hash_id(np, chain_code_hex, public_key_hex) } };
+        return get_wallet_hash_ids(np, chain_code_hex, public_key_hex);
     }
 
     bool nsee_log_info(std::string message, const char* context)
@@ -767,9 +793,22 @@ namespace sdk {
         return true;
     }
 
+    std::string get_diagnostic_information(const boost::exception& e) { return boost::diagnostic_information(e); }
+
     // For use in gdb as
     // printf "%s", gdb_dump_json(<json_variable>).c_str()
     std::string gdb_dump_json(const nlohmann::json& json) { return json.dump(4); }
+
+    bool is_valid_utf8(const std::string& str)
+    {
+        try {
+            // using nlohmann::json::dump() as shortcut for utf-8 validity check
+            (void)nlohmann::json(str).dump();
+            return true;
+        } catch (const std::exception&) {
+        }
+        return false;
+    }
 
 } // namespace sdk
 } // namespace ga

@@ -7,8 +7,15 @@ GDK documentation
 
    gdk
    gdk-json
+   gdk-create-tx
    gdk-ntf
    gdk-hw
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Developer Guides
+
+   gdk-swap
 
 Indices and tables
 ==================

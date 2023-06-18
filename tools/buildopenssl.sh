@@ -15,21 +15,18 @@ else
     exit 1
 fi
 
-OPENSSL_NAME="openssl-OpenSSL_1_1_1n"
+OPENSSL_NAME="$(basename ${PRJ_SUBDIR})"
 OPENSSL_OPTIONS="enable-ec_nistp_64_gcc_128 no-gost no-shared no-dso no-ssl2 no-ssl3 no-idea no-dtls no-dtls1 no-weak-ssl-ciphers no-comp -fvisibility=hidden no-err no-psk no-srp"
 OPENSSL_MOBILE="no-hw no-engine"
 
-if [ ! -d "${MESON_BUILD_ROOT}/openssl" ]; then
-    cp -r "${MESON_SOURCE_ROOT}/subprojects/${OPENSSL_NAME}" "${MESON_BUILD_ROOT}/openssl"
-fi
 
-cd "${MESON_BUILD_ROOT}/openssl"
-openssl_prefix="${MESON_BUILD_ROOT}/openssl/build"
+cd "${PRJ_SUBDIR}"
+openssl_prefix="${GDK_BUILD_ROOT}/openssl/build"
 if [ \( "$1" = "--ndk" \) ]; then
     if [ "$ANDROID_VERSION" = "19" ]; then
             OPENSSL_OPTIONS=$(echo $OPENSSL_OPTIONS | $SED -e "s/enable-ec_nistp_64_gcc_128//g")
     fi
-    . ${MESON_SOURCE_ROOT}/tools/env.sh
+    . ${GDK_SOURCE_ROOT}/tools/env.sh
     $SED -ie "133s!\$triarch\-!!" "Configurations/15-android.conf"
     $SED -ie "137s!\$triarch\-!!" "Configurations/15-android.conf"
     if [ $HOST_ARCH = "armeabi-v7a" ]; then
@@ -41,16 +38,17 @@ if [ \( "$1" = "--ndk" \) ]; then
     make -j$NUM_JOBS 2> /dev/null
     make install_sw
 elif [ \( "$1" = "--iphone" \) -o \( "$1" = "--iphonesim" \) ]; then
-    . ${MESON_SOURCE_ROOT}/tools/ios_env.sh $1
+    . ${GDK_SOURCE_ROOT}/tools/ios_env.sh $1
 
     export CC=${XCODE_DEFAULT_PATH}/clang
-    export CROSS_TOP="${XCODE_PATH}/Platforms/${IOS_PLATFORM}.platform/Developer"
+    export CROSS_TOP="${IOS_SDK_PLATFORM}/Developer"
     export CROSS_SDK="${IOS_PLATFORM}.sdk"
     export PATH="${XCODE_DEFAULT_PATH}:$PATH"
+     export ARCH=$(uname -m)
     if test "x$1" == "x--iphonesim"; then
         CONFIG_TARGET="iossimulator-xcrun"
         NOASM=no-asm
-        $SED -i "33a cflags           => add(\"-arch x86_64 -mios-version-min=7.0.0 -fno-common -isysroot $CROSS_TOP/SDKs/$CROSS_SDK\")," Configurations/15-ios.conf
+        $SED -i "33a cflags           => add(\"${IOS_CFLAGS} -fno-common\")," Configurations/15-ios.conf
     else
         CONFIG_TARGET="ios64-cross"
         NOASM=

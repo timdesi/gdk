@@ -1,31 +1,30 @@
 use crate::account::xpubs_equivalent;
 use crate::spv::CrossValidationResult;
-use crate::Error;
-use aes_gcm_siv::aead::{AeadInPlace, NewAead};
-use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce};
-use bitcoin::hashes::{sha256, Hash};
-use bitcoin::util::bip32::{DerivationPath, ExtendedPubKey};
-use bitcoin::Transaction;
-use elements::TxOutSecrets;
+use crate::{Error, ScriptStatuses};
+use gdk_common::aes::Aes256GcmSiv;
 use gdk_common::be::BETxidConvert;
 use gdk_common::be::{
     BEBlockHash, BEBlockHeader, BEScript, BETransaction, BETransactionEntry, BETransactions, BETxid,
 };
+use gdk_common::bitcoin::hashes::{sha256, Hash};
+use gdk_common::bitcoin::util::bip32::{DerivationPath, ExtendedPubKey};
+use gdk_common::bitcoin::{Transaction, Txid};
+use gdk_common::elements;
+use gdk_common::elements::TxOutSecrets;
+use gdk_common::log::{info, log, Level};
 use gdk_common::model::{AccountSettings, FeeEstimate, SPVVerifyTxResult, Settings};
+use gdk_common::store::{Decryptable, Encryptable, ToCipher};
 use gdk_common::wally::MasterBlindingKey;
 use gdk_common::NetworkId;
-use log::{info, warn};
-use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
-
-pub const BATCH_SIZE: u32 = 20;
 
 pub type Store = Arc<RwLock<StoreMeta>>;
 
@@ -72,7 +71,7 @@ pub struct RawCache {
     pub master_blinding: Option<MasterBlindingKey>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RawAccountCache {
     /// contains all my tx and all prevouts
     pub all_txs: BETransactions,
@@ -93,18 +92,19 @@ pub struct RawAccountCache {
     pub indexes: Indexes,
 
     /// the xpub of the account
-    ///
-    /// This field is optional to avoid breaking the cache,
-    /// but it should always be set.
-    pub xpub: Option<ExtendedPubKey>,
+    pub xpub: ExtendedPubKey,
 
     /// Whether the subaccount was discovered through bip44 subaccount discovery
     ///
     /// If an account is discovered through bip44, then it has at least one transaction. This is
     /// used to establish if an account has some transactions without waiting for the syncer to
     /// download transactions.
-    /// If None, the account was created before the addition of this field.
-    pub bip44_discovered: Option<bool>,
+    pub bip44_discovered: bool,
+
+    /// Maps scripts to their current script status.
+    ///
+    /// NOTE: is Option to keep cache backwards-compatibility, remove if breaking cache
+    pub script_statuses: Option<ScriptStatuses>,
 }
 
 /// RawStore contains data that are not extractable from xpub+blockchain
@@ -115,7 +115,7 @@ pub struct RawStore {
     settings: Option<Settings>,
 
     /// transaction memos (account_num -> txid -> memo)
-    memos: HashMap<bitcoin::Txid, String>,
+    memos: HashMap<Txid, String>,
 
     // additional fields should always be appended at the end as an `Option` to retain db backwards compatibility
     /// account settings
@@ -169,8 +169,8 @@ impl RawCache {
     /// create a new RawCache, try to load data from a file or a fallback file
     /// errors such as corrupted file or model change in the db, result in a empty store that will be repopulated
     fn new<P: AsRef<Path>>(path: P, cipher: &Aes256GcmSiv) -> Self {
-        Self::try_new(path, cipher).unwrap_or_else(|e| {
-            warn!("Initialize cache as default {:?}", e);
+        Self::try_new(path.as_ref(), cipher).unwrap_or_else(|e| {
+            log_initialization(e, path);
             Default::default()
         })
     }
@@ -211,8 +211,8 @@ impl RawStore {
     /// create a new RawStore, try to load data from a file or a fallback file
     /// errors such as corrupted file or model change in the db, result in a empty store that will be repopulated
     fn new<P: AsRef<Path>>(path: P, cipher: &Aes256GcmSiv) -> Self {
-        Self::try_new(path, cipher).unwrap_or_else(|e| {
-            warn!("Initialize store as default {:?}", e);
+        Self::try_new(path.as_ref(), cipher).unwrap_or_else(|e| {
+            log_initialization(e, path);
             Default::default()
         })
     }
@@ -224,6 +224,14 @@ impl RawStore {
     }
 }
 
+fn log_initialization<P: AsRef<Path>>(e: Error, path: P) {
+    let level = match e {
+        Error::FileNotExist(_) => Level::Info,
+        _ => Level::Warn,
+    };
+    log!(level, "Initialize {:?} as default {:?}", path.as_ref(), e);
+}
+
 fn load_decrypt<P: AsRef<Path>>(
     kind: Kind,
     path: P,
@@ -233,30 +241,14 @@ fn load_decrypt<P: AsRef<Path>>(
     let mut store_path = PathBuf::from(path.as_ref());
     store_path.push(kind.to_string());
     if !store_path.exists() {
-        return Err(Error::Generic(format!("{:?} do not exist", store_path)));
+        return Err(Error::FileNotExist(store_path));
     }
     let mut file = File::open(&store_path)?;
-    let mut nonce_bytes = [0u8; 12];
-    file.read_exact(&mut nonce_bytes)?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let mut ciphertext = vec![];
-    file.read_to_end(&mut ciphertext)?;
 
-    cipher.decrypt_in_place(nonce, b"", &mut ciphertext)?;
-    let plaintext = ciphertext;
+    let plaintext = file.decrypt(cipher)?;
 
     info!("loading {:?} took {}ms", &store_path, now.elapsed().as_millis());
     Ok(plaintext)
-}
-
-fn get_cipher(xpub: &ExtendedPubKey) -> Aes256GcmSiv {
-    let mut enc_key_data = vec![];
-    enc_key_data.extend(&xpub.public_key.to_bytes());
-    enc_key_data.extend(&xpub.chain_code.to_bytes());
-    enc_key_data.extend(&xpub.network.magic().to_be_bytes());
-    let key_bytes = sha256::Hash::hash(&enc_key_data).into_inner();
-    let key = Key::from_slice(&key_bytes);
-    Aes256GcmSiv::new(&key)
 }
 
 impl StoreMeta {
@@ -265,7 +257,7 @@ impl StoreMeta {
         xpub: &ExtendedPubKey,
         id: NetworkId,
     ) -> Result<StoreMeta, Error> {
-        let cipher = get_cipher(xpub);
+        let cipher = xpub.to_cipher()?;
         let cache = RawCache::new(path.as_ref(), &cipher);
 
         let mut store = RawStore::new(path.as_ref(), &cipher);
@@ -306,25 +298,24 @@ impl StoreMeta {
 
     fn flush_serializable(&mut self, kind: Kind) -> Result<(), Error> {
         let now = Instant::now();
-        let mut nonce_bytes = [0u8; 12];
-        thread_rng().fill(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-        let mut plaintext = match kind {
+
+        let plaintext = match kind {
             Kind::Store => serde_cbor::to_vec(&self.store),
             Kind::Cache => serde_cbor::to_vec(&self.cache),
         }?;
 
         let hash = sha256::Hash::hash(&plaintext);
+
         if let Some(last_hash) = self.last.get(&kind) {
             if last_hash == &hash {
                 info!("latest serialization hash matches, no need to flush");
                 return Ok(());
             }
         }
+
         self.last.insert(kind, hash);
 
-        self.cipher.encrypt_in_place(nonce, b"", &mut plaintext)?;
-        let ciphertext = plaintext;
+        let (nonce_bytes, ciphertext) = plaintext.encrypt(&self.cipher)?;
 
         let store_path = self.file_path(kind);
         //TODO should avoid rewriting if not changed? it involves saving plaintext (or struct hash)
@@ -381,23 +372,18 @@ impl StoreMeta {
             .get_or_insert_with(|| Default::default())
             .entry(account_num)
             .or_default();
+
         match self.cache.accounts.entry(account_num) {
             Entry::Vacant(entry) => {
-                let mut account = RawAccountCache::default();
-                account.xpub = Some(account_xpub);
-                account.bip44_discovered = Some(discovered);
+                let account = RawAccountCache::new(account_xpub, discovered);
                 entry.insert(account);
             }
-            Entry::Occupied(mut entry) => {
-                match entry.get().xpub {
-                    None => {
-                        // This is a cache upgrade from a version that did not persist the xpub
-                        entry.get_mut().xpub = Some(account_xpub);
-                    }
-                    Some(xpub) => xpubs_equivalent(&xpub, &account_xpub)?,
-                }
+            Entry::Occupied(entry) => {
+                // Should we `.unwrap()` instead?
+                xpubs_equivalent(&entry.get().xpub, &account_xpub)?
             }
         }
+
         Ok(())
     }
 
@@ -423,12 +409,20 @@ impl StoreMeta {
         account_nums
     }
 
+    fn default_min_fee_rate(&self) -> u64 {
+        match self.id {
+            NetworkId::Bitcoin(_) => 1000,
+            NetworkId::Elements(_) => 100,
+        }
+    }
+
+    pub fn min_fee_rate(&self) -> u64 {
+        self.cache.fee_estimates.get(0).map_or_else(|| self.default_min_fee_rate(), |f| f.0)
+    }
+
     pub fn fee_estimates(&self) -> Vec<FeeEstimate> {
         if self.cache.fee_estimates.is_empty() {
-            let min_fee = match self.id {
-                NetworkId::Bitcoin(_) => 1000,
-                NetworkId::Elements(_) => 100,
-            };
+            let min_fee = self.default_min_fee_rate();
             vec![FeeEstimate(min_fee); 25]
         } else {
             self.cache.fee_estimates.clone()
@@ -471,8 +465,14 @@ impl StoreMeta {
         self.get_account_settings(account_num).map(|s| &s.name)
     }
 
-    pub fn set_account_settings(&mut self, account_num: u32, settings: AccountSettings) {
+    pub fn set_account_settings(
+        &mut self,
+        account_num: u32,
+        settings: AccountSettings,
+    ) -> Result<(), Error> {
         self.store.accounts_settings.as_mut().unwrap().insert(account_num, settings);
+        self.flush_store()?;
+        Ok(())
     }
 
     pub fn spv_verification_status(&self, account_num: u32, txid: &BETxid) -> SPVVerifyTxResult {
@@ -509,10 +509,29 @@ impl StoreMeta {
         }
         Err(Error::TxNotFound(txid.clone()))
     }
+
+    pub fn update_tip(&mut self, new_height: u32, new_header: BEBlockHeader) -> Result<(), Error> {
+        self.cache.tip_ = Some((new_height, new_header));
+        self.flush_cache()?;
+        Ok(())
+    }
 }
 
 impl RawAccountCache {
-    pub fn get_bitcoin_tx(&self, txid: &bitcoin::Txid) -> Result<Transaction, Error> {
+    pub fn new(xpub: ExtendedPubKey, bip44_discovered: bool) -> Self {
+        RawAccountCache {
+            all_txs: Default::default(),
+            paths: Default::default(),
+            scripts: Default::default(),
+            heights: Default::default(),
+            script_statuses: Default::default(),
+            unblinded: Default::default(),
+            indexes: Default::default(),
+            xpub,
+            bip44_discovered,
+        }
+    }
+    pub fn get_bitcoin_tx(&self, txid: &Txid) -> Result<Transaction, Error> {
         match self.all_txs.get(&txid.into_be()).map(|etx| &etx.tx) {
             Some(BETransaction::Bitcoin(tx)) => Ok(tx.clone()),
             _ => Err(Error::TxNotFound(BETxid::Bitcoin(txid.clone()))),
@@ -534,8 +553,8 @@ impl RawAccountCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::util::bip32::ExtendedPubKey;
-    use bitcoin::Network;
+    use gdk_common::bitcoin::util::bip32::ExtendedPubKey;
+    use gdk_common::bitcoin::{Network, Txid};
     use gdk_common::{be::BETxid, NetworkId};
     use std::str::FromStr;
     use tempfile::TempDir;
@@ -572,7 +591,7 @@ mod tests {
         #[derive(Serialize, Deserialize)]
         struct RawStoreV0 {
             settings: Option<Settings>,
-            memos: HashMap<bitcoin::Txid, String>,
+            memos: HashMap<Txid, String>,
         }
 
         type RawStoreV1 = RawStore;
@@ -581,7 +600,7 @@ mod tests {
             settings: Some(Settings::default()),
             memos: {
                 let mut memos = HashMap::new();
-                memos.insert(bitcoin::Txid::default(), "Foobar".into());
+                memos.insert(Txid::all_zeros(), "Foobar".into());
                 memos
             },
         };
@@ -596,5 +615,38 @@ mod tests {
         let store_v0: RawStoreV0 = serde_cbor::from_slice(&blob).unwrap();
         assert_eq!(store_v0.settings, store_v1.settings);
         assert_eq!(store_v0.memos, store_v1.memos);
+    }
+
+    #[test]
+    fn test_cache_upgrade() {
+        #[derive(Serialize, Deserialize)]
+        pub struct RawAccountCacheV0 {
+            pub all_txs: BETransactions,
+            pub paths: HashMap<BEScript, DerivationPath>,
+            pub scripts: HashMap<DerivationPath, BEScript>,
+            pub heights: HashMap<BETxid, Option<u32>>,
+            pub unblinded: HashMap<elements::OutPoint, TxOutSecrets>,
+            pub indexes: Indexes,
+            pub xpub: ExtendedPubKey,
+            pub bip44_discovered: bool,
+        }
+        type RawAccountCacheV1 = RawAccountCache;
+
+        let cache_v0 = RawAccountCacheV0 {
+            all_txs: Default::default(),
+            paths: Default::default(),
+            scripts: Default::default(),
+            heights: Default::default(),
+            unblinded: Default::default(),
+            indexes: Default::default(),
+            xpub: ExtendedPubKey::from_str("xpub67tVq9TC3jGc93MFouaJsne9ysbJTgd2z283AhzbJnJBYLaSgd7eCneb917z4mCmt9NT1jrex9JwZnxSqMo683zUWgMvBXGFcep95TuSPo6").unwrap(),
+            bip44_discovered: Default::default(),
+        };
+
+        let blob = serde_cbor::to_vec(&cache_v0).unwrap();
+        let cache_v1 = serde_cbor::from_slice::<RawAccountCacheV1>(&blob);
+        assert!(cache_v1.is_ok(), "cache compatibility broke, not critical but think twice");
+
+        assert_eq!(cache_v0.xpub, cache_v1.unwrap().xpub);
     }
 }

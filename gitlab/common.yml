@@ -1,0 +1,63 @@
+
+####### DOCKER IMAGES
+.debian-image:
+  image: blockstream/gdk-debian-ci@sha256:1c00c2e78b50e8cc4eb7d4c637f9800f7915ec5b8b7263b40e7ee3d410364a39
+  tags: [ ga ]
+
+.android-image:
+  image: blockstream/gdk-android-builder@sha256:413a3003202fdf30c65a887de9afbd824f0327353d68fb05415f0df8cb424795
+  tags: [ ga ]
+
+.python-image:
+  image: blockstream/gdk-python-builder@sha256:ccb79b2780b87b918af4cf7e119688fdaf1f872e3239fd3a025f7ab3f1f4fb4e
+  tags: [ ga ]
+
+.ubuntu-image:
+  image: blockstream/gdk-ubuntu-builder@sha256:918e001df4445d042ebf1d9e06edc4e52fa74bec3e8e2561b28dd4947672b765
+  tags: [ ga ]
+
+.fedora-image:
+  image: blockstream/gdk-fedora-builder@sha256:facc2d6746c450b0e3a9cadc70bf59e427755100bba70a13c01c7722cdabfb10
+  tags: [ ga ]
+
+
+.py_release:
+  variables:
+    INSTALL_PATH: "gdk-python"
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_SHORT_SHA"
+    expire_in: 1 day
+    when: on_success
+    paths:
+    - wheelhouse
+
+
+.gcloud-publish:
+  image: blockstream/gcloud-docker-tf:1.1.7
+  tags:
+    - ga
+  stage: publish
+  variables:
+    GCLOUD_URL: "gs://green-gdk-builds"
+  before_script:
+    - subfolder=$CI_PROJECT_NAME-$CI_COMMIT_SHA
+    - if [[ ${CI_COMMIT_REF_NAME} == "master" ]]; then subfolder=gdk-master; fi
+    - TMPF=$(mktemp) || exit 1
+    - echo $GCLOUD_PUSH_KEY > $TMPF
+    - export GOOGLE_APPLICATION_CREDENTIALS=$TMPF
+    - gcloud auth activate-service-account --key-file=$TMPF
+    - rm -f $TMPF
+
+
+
+##### WARNING!!!!
+    # $PREBUILT_SUBDIR is the folder for the DIY caching system we have in place in mac machines
+    # BUILD_IDX is your life belt in case you messed the CI up during the prebuild phase and the PREBUILT_DIR folder
+    # is left in an unconsistent state, just change the BUILD_IDX and you are good to go.
+    # when merged, go through all mac machines to delete old version of cache and reclaim some storage space
+.osx_env:
+  variables:
+    BUILD_IDX: "0"
+  before_script:
+    - idx=($(shasum tools/* cmake/profiles/* | shasum))
+    - export PREBUILT_SUBDIR="prebuilt-${idx}-${BUILD_IDX}"

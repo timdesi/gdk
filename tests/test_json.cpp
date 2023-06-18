@@ -1,5 +1,6 @@
 #include "include/gdk.h"
 #include "src/assertion.hpp"
+#include "src/utils.hpp"
 #include <nlohmann/json.hpp>
 #include <string.h>
 
@@ -27,28 +28,50 @@ int main()
 
     GDK_RUNTIME_ASSERT(GA_destroy_json(json) == GA_OK);
 
-    // Default-constructed JSON is both empty and null
+    // Default-constructed JSON is both empty and null, and not an object
     GDK_RUNTIME_ASSERT(nlohmann::json().empty());
     GDK_RUNTIME_ASSERT(nlohmann::json().is_null());
+    GDK_RUNTIME_ASSERT(!nlohmann::json().is_object());
 
-    // Empty init list constructed JSON is both empty but *not* null
+    // Empty init list constructed JSON is empty but *not* null, and is an object
     GDK_RUNTIME_ASSERT(nlohmann::json({}).empty());
     GDK_RUNTIME_ASSERT(!nlohmann::json({}).is_null());
+    GDK_RUNTIME_ASSERT(nlohmann::json({}).is_object());
 
-    // JSON constructed from an empty object is empty but *not* null
+    // JSON constructed from an empty object is empty but *not* null, and is an object
     GDK_RUNTIME_ASSERT(nlohmann::json(nlohmann::json::object()).empty());
     GDK_RUNTIME_ASSERT(!nlohmann::json(nlohmann::json::object()).is_null());
+    GDK_RUNTIME_ASSERT(nlohmann::json(nlohmann::json::object()).is_object());
 
-    // Default-constructed JSON Object is empty but *not* null
+    // Default-constructed JSON Object is empty but *not* null, and is an object
     GDK_RUNTIME_ASSERT(nlohmann::json::object().empty());
     GDK_RUNTIME_ASSERT(!nlohmann::json::object().is_null());
+    GDK_RUNTIME_ASSERT(nlohmann::json::object().is_object());
 
-    // Verify that an object with its keys erased is empty but *not* null
+    // An object with its keys erased is empty but *not* null, and is an object
     auto obj = nlohmann::json::object();
     obj["foo"] = "bar";
     obj.erase("foo");
     GDK_RUNTIME_ASSERT(obj.empty());
     GDK_RUNTIME_ASSERT(!obj.is_null());
+    GDK_RUNTIME_ASSERT(obj.is_object());
+
+    // A moved json object is empty and null, and is not an object
+    nlohmann::json moved_from = { { "foo", "bar" } };
+    nlohmann::json moved_to;
+    moved_to = std::move(moved_from);
+    GDK_RUNTIME_ASSERT(moved_from.empty());
+    GDK_RUNTIME_ASSERT(moved_from.is_null());
+    GDK_RUNTIME_ASSERT(!moved_from.is_object());
+    // The moved to object contains the moved from data
+    GDK_RUNTIME_ASSERT(moved_to.at("foo") == "bar");
+    // The moved from object can continue to be used without re-assigning an
+    // empty object to it (i.e. move on this object is not destructive; the
+    // object remains valid, just empty and null). In particular, we can
+    // continue to set values and call members on it.
+    GDK_RUNTIME_ASSERT(!moved_from.contains("foo"));
+    moved_from["foo"] = "bar";
+    GDK_RUNTIME_ASSERT(moved_from.value("foo", "") == "bar");
 
     // References to blank string values are not empty() and have a size() of 1
     // This is because the reference is to the holding json object, not the
@@ -66,6 +89,11 @@ int main()
     GDK_RUNTIME_ASSERT(array_test.at("empty").size() == 0);
     GDK_RUNTIME_ASSERT(array_test["empty"].empty());
     GDK_RUNTIME_ASSERT(array_test["empty"].size() == 0);
+
+    GDK_RUNTIME_ASSERT(ga::sdk::is_valid_utf8("hello world") == true);
+    GDK_RUNTIME_ASSERT(ga::sdk::is_valid_utf8("مرحبا بالعالم") == true);
+    GDK_RUNTIME_ASSERT(ga::sdk::is_valid_utf8("Բարեւ աշխարհ") == true);
+    GDK_RUNTIME_ASSERT(ga::sdk::is_valid_utf8("\xa0\xa1") == false);
 
     return 0;
 }

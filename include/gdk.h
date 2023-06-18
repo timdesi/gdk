@@ -6,20 +6,10 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "gdk_export.h"
+
 #ifdef __cplusplus
 extern "C" {
-#endif
-
-#if defined(_WIN32)
-#ifdef GDK_BUILD
-#define GDK_API __declspec(dllexport)
-#else
-#define GDK_API
-#endif
-#elif defined(__GNUC__) && defined(GDK_BUILD)
-#define GDK_API __attribute__((visibility("default")))
-#else
-#define GDK_API
 #endif
 
 /** Error codes for API calls */
@@ -181,29 +171,26 @@ GDK_API int GA_http_request(struct GA_session* session, const GA_json* params, G
  *
  * Refresh the sessions internal cache of Liquid asset information.
  *
+ * Each release of GDK comes with a partial list of Liquid assets built-in.
+ * This call is used to update it to include all the registered Liquid assets
+ * or any new assets that have been registered since the last update.
+ *
  * :param session: The session to use.
  * :param params: the :ref:`assets-params-data` of the server to connect to.
- * :param output: Destination for the output :ref:`asset-informations`.
- *|     Returned GA_json should be freed using `GA_destroy_json`.
- *
- * Each release of GDK comes with a list of the latest registered Liquid
- * assets built-in. This call is used to return this data and/or to update
- * it to include any new assets that have been registered since installation
- * or the last update.
  */
-GDK_API int GA_refresh_assets(struct GA_session* session, const GA_json* params, GA_json** output);
+GDK_API int GA_refresh_assets(struct GA_session* session, const GA_json* params);
 
 /**
  *
  * Query the Liquid asset registry.
  *
- * :param session: The session to use.
- * :param params: the :ref:`get-assets-params` specifying the assets to query.
- * :param output: Destination for the output :ref:`asset-informations`.
- *|     Returned GA_json should be freed using `GA_destroy_json`.
- *
  * This call is used to retrieve informations about a set of Liquid assets
  * specified by their asset id.
+ *
+ * :param session: The session to use.
+ * :param params: the :ref:`get-assets-params` specifying the assets to query.
+ * :param output: Destination for the output :ref:`asset-details`.
+ *|     Returned GA_json should be freed using `GA_destroy_json`.
  */
 GDK_API int GA_get_assets(struct GA_session* session, const GA_json* params, GA_json** output);
 
@@ -215,6 +202,20 @@ GDK_API int GA_get_assets(struct GA_session* session, const GA_json* params, GA_
 GDK_API int GA_validate_asset_domain_name(struct GA_session* session, const GA_json* params, GA_json** output);
 
 /**
+ * Validate a gdk format JSON document.
+ *
+ * :param session: The session to use.
+ * :param details: The :ref:`validate-details` to validate.
+ * :param call: Destination for the resulting GA_auth_handler to complete the action.
+ *|     The call handlers result is :ref:`validate-result`.
+ *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call
+ *completes.
+ */
+GDK_API int GA_validate(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
+
+/**
  * Create a new user wallet.
  *
  * :param session: The session to use.
@@ -222,9 +223,12 @@ GDK_API int GA_validate_asset_domain_name(struct GA_session* session, const GA_j
  * :param details: The :ref:`login-credentials` for software wallet registration.
  * :param call: Destination for the resulting GA_auth_handler to perform the registration.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameters ``hw_device`` and ``details`` will be emptied when the call
+ *completes.
  */
 GDK_API int GA_register_user(
-    struct GA_session* session, const GA_json* hw_device, const GA_json* details, struct GA_auth_handler** call);
+    struct GA_session* session, GA_json* hw_device, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Authenticate to a user's wallet.
@@ -239,9 +243,12 @@ GDK_API int GA_register_user(
  * reconnected, the user will need to login again using this function. In
  * this case, the caller can pass empty JSON for both ``hw_device`` and
  * ``details`` to login using the previously passed credentials and device.
+ *
+ * .. note:: When calling from C/C++, the parameters ``hw_device`` and ``details`` will be emptied when the call
+ *completes.
  */
 GDK_API int GA_login_user(
-    struct GA_session* session, const GA_json* hw_device, const GA_json* details, struct GA_auth_handler** call);
+    struct GA_session* session, GA_json* hw_device, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Set or disable a watch-only login for a logged-in user wallet.
@@ -296,8 +303,10 @@ GDK_API int GA_remove_account(struct GA_session* session, struct GA_auth_handler
  *|     be populated, and ``"recovery_mnemonic"`` will contain the recovery mnemonic
  *|     passphrase if one was generated. These values must be stored safely by the
  *|     caller as they will not be returned again by any call such as `GA_get_subaccounts`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
  */
-GDK_API int GA_create_subaccount(struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_create_subaccount(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Get the user's subaccount details.
@@ -341,8 +350,10 @@ GDK_API int GA_rename_subaccount(struct GA_session* session, uint32_t subaccount
  * :param details: :ref:`subaccount-update` giving the details to update.
  * :param call: Destination for the resulting GA_auth_handler to complete the action.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes
  */
-GDK_API int GA_update_subaccount(struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_update_subaccount(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Get a page of the user's transaction history.
@@ -352,9 +363,11 @@ GDK_API int GA_update_subaccount(struct GA_session* session, const GA_json* deta
  * :param call: Destination for the resulting GA_auth_handler to complete the action.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
  *
- * .. note:: Transactions are returned from newest to oldest with up to 30 transactions per page.
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
+ *
+ * .. note:: Transactions are returned as :ref:`tx-list` from newest to oldest with up to 30 transactions per page.
  */
-GDK_API int GA_get_transactions(struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_get_transactions(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Get a new address to receive coins to.
@@ -363,8 +376,10 @@ GDK_API int GA_get_transactions(struct GA_session* session, const GA_json* detai
  * :param details: :ref:`receive-address-details`.
  * :param call: Destination for the resulting GA_auth_handler to complete the action.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
  */
-GDK_API int GA_get_receive_address(struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_get_receive_address(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Get a page of addresses previously generated for a subaccount.
@@ -375,11 +390,12 @@ GDK_API int GA_get_receive_address(struct GA_session* session, const GA_json* de
  *|     The call handlers result is :ref:`previous-addresses`.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
  *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
+ *
  * .. note:: Iteration of all addresses is complete when 'last_pointer' is not
  *|     present in the results.
  */
-GDK_API int GA_get_previous_addresses(
-    struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_get_previous_addresses(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Get the user's unspent transaction outputs.
@@ -389,8 +405,10 @@ GDK_API int GA_get_previous_addresses(
  * :param call: Destination for the resulting GA_auth_handler to complete the action.
  *|     The call handlers result is :ref:`unspent-outputs`.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
  */
-GDK_API int GA_get_unspent_outputs(struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_get_unspent_outputs(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Get the unspent transaction outputs associated with a non-wallet private key.
@@ -414,9 +432,10 @@ GDK_API int GA_get_unspent_outputs_for_private_key(
  * :param details: :ref:`unspent-outputs-status` detailing the unspent transaction outputs status to set.
  * :param call: Destination for the resulting GA_auth_handler to complete the action.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
  */
-GDK_API int GA_set_unspent_outputs_status(
-    struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_set_unspent_outputs_status(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Get a transaction's details.
@@ -436,8 +455,10 @@ GDK_API int GA_get_transaction_details(struct GA_session* session, const char* t
  *|    compute the balance from.
  * :param call: Destination for the resulting GA_auth_handler to complete the action.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
  */
-GDK_API int GA_get_balance(struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_get_balance(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Get the list of allowed currencies for all available pricing sources.
@@ -459,15 +480,30 @@ GDK_API int GA_get_available_currencies(struct GA_session* session, GA_json** cu
 GDK_API int GA_convert_amount(struct GA_session* session, const GA_json* value_details, GA_json** output);
 
 /**
- * Encrypt json with server provided key protected by a PIN.
+ * Encrypt JSON with a server provided key protected by a PIN.
  *
  * :param session: The session to use.
  * :param details: The :ref:`encrypt-with-pin-details` to encrypt.
  * :param call: Destination for the resulting GA_auth_handler to complete the action.
  *|     The call handlers result is :ref:`encrypt-with-pin-result` which the caller should persist.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
  */
-GDK_API int GA_encrypt_with_pin(struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_encrypt_with_pin(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
+
+/**
+ * Decrypt JSON with a server provided key protected by a PIN.
+ *
+ * :param session: The session to use.
+ * :param details: The :ref:`decrypt-with-pin-details` to decrypt.
+ * :param call: Destination for the resulting GA_auth_handler to complete the action.
+ *|     The call handlers result is the decrypted JSON.
+ *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
+ */
+GDK_API int GA_decrypt_with_pin(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Disable all PIN logins previously set.
@@ -486,9 +522,24 @@ GDK_API int GA_disable_all_pin_logins(struct GA_session* session);
  * :param transaction_details: The :ref:`create-tx-details` for constructing.
  * :param call: Destination for the resulting GA_auth_handler to complete the action.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``transaction_details`` will be emptied when the call completes.
  */
 GDK_API int GA_create_transaction(
-    struct GA_session* session, const GA_json* transaction_details, struct GA_auth_handler** call);
+    struct GA_session* session, GA_json* transaction_details, struct GA_auth_handler** call);
+
+/**
+ * Blind a transaction.
+ *
+ * :param session: The session to use.
+ * :param transaction_details: The :ref:`create-tx-details` for blinding.
+ * :param call: Destination for the resulting GA_auth_handler to complete the action.
+ *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``transaction_details`` will be emptied when the call completes.
+ */
+GDK_API int GA_blind_transaction(
+    struct GA_session* session, GA_json* transaction_details, struct GA_auth_handler** call);
 
 /**
  * Sign the user's inputs to a transaction.
@@ -497,9 +548,35 @@ GDK_API int GA_create_transaction(
  * :param transaction_details: The :ref:`sign-tx-details` for signing, previously returned from GA_create_transaction.
  * :param call: Destination for the resulting GA_auth_handler to perform the signing.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``transaction_details`` will be emptied when the call completes.
  */
 GDK_API int GA_sign_transaction(
-    struct GA_session* session, const GA_json* transaction_details, struct GA_auth_handler** call);
+    struct GA_session* session, GA_json* transaction_details, struct GA_auth_handler** call);
+
+/**
+ * Construct the initiators side of a swap transaction.
+ *
+ * :param session: The session to use.
+ * :param swap_details: The :ref:`create-swap-tx-details` for constructing.
+ * :param call: Destination for the resulting GA_auth_handler to complete the action.
+ *|     The call handlers result is :ref:`create-swap-tx-result`.
+ *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ */
+GDK_API int GA_create_swap_transaction(
+    struct GA_session* session, const GA_json* swap_details, struct GA_auth_handler** call);
+
+/**
+ * Complete construction of the callers side of a swap transaction.
+ *
+ * :param session: The session to use.
+ * :param swap_details: The :ref:`complete-swap-tx-details` for completing.
+ * :param call: Destination for the resulting GA_auth_handler to complete the action.
+ *|     The call handlers result is :ref:`complete-swap-tx-result`.
+ *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ */
+GDK_API int GA_complete_swap_transaction(
+    struct GA_session* session, const GA_json* swap_details, struct GA_auth_handler** call);
 
 /**
  * Sign one or more of a user's inputs in a PSBT or PSET.
@@ -510,9 +587,11 @@ GDK_API int GA_sign_transaction(
  *|     The call handlers result is :ref:`sign-psbt-result`.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
  *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
+ *
  * .. note:: EXPERIMENTAL warning: this call may be changed in future releases.
  */
-GDK_API int GA_psbt_sign(struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_psbt_sign(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Get wallet details of a PSBT or PSET.
@@ -523,9 +602,11 @@ GDK_API int GA_psbt_sign(struct GA_session* session, const GA_json* details, str
  *|     The call handlers result is :ref:`psbt-get-details-result`.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
  *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
+ *
  * .. note:: EXPERIMENTAL warning: this call may be changed in future releases.
  */
-GDK_API int GA_psbt_get_details(struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_psbt_get_details(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Broadcast a fully signed transaction to the P2P network.
@@ -544,9 +625,24 @@ GDK_API int GA_broadcast_transaction(struct GA_session* session, const char* tra
  * :param transaction_details: The :ref:`send-tx-details` for sending.
  * :param call: Destination for the resulting GA_auth_handler to perform the send.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``transaction_details`` will be emptied when the call completes.
  */
 GDK_API int GA_send_transaction(
-    struct GA_session* session, const GA_json* transaction_details, struct GA_auth_handler** call);
+    struct GA_session* session, GA_json* transaction_details, struct GA_auth_handler** call);
+
+/**
+ * Sign a message with the private key of an address.
+ *
+ * :param session: The session to use.
+ * :param details: The :ref:`sign-message-request` detailing the message to sign and how to sign it.
+ * :param call: Destination for the resulting GA_auth_handler to perform the signing.
+ *|     The call handlers result is :ref:`sign-message-result`.
+ *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
+ */
+GDK_API int GA_sign_message(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Create a PSETv2 filling UTXO details and receive/change outputs.
@@ -584,8 +680,10 @@ GDK_API int GA_send_nlocktimes(struct GA_session* session);
  * :param locktime_details: The :ref:`set-locktime-details` for setting the block value.
  * :param call: Destination for the resulting GA_auth_handler to change the locktime.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``locktime_details`` will be emptied when the call completes.
  */
-GDK_API int GA_set_csvtime(struct GA_session* session, const GA_json* locktime_details, struct GA_auth_handler** call);
+GDK_API int GA_set_csvtime(struct GA_session* session, GA_json* locktime_details, struct GA_auth_handler** call);
 
 /**
  * Set the number of blocks after which nLockTime transactions become
@@ -636,8 +734,10 @@ GDK_API int GA_get_fee_estimates(struct GA_session* session, GA_json** estimates
  * :param call: Destination for the resulting GA_auth_handler to get the user's credentials.
  *|     The call handlers result is :ref:`login-credentials`.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
  */
-GDK_API int GA_get_credentials(struct GA_session* session, const GA_json* details, struct GA_auth_handler** call);
+GDK_API int GA_get_credentials(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 /**
  * Get the latest un-acknowledged system message.
@@ -679,8 +779,10 @@ GDK_API int GA_get_twofactor_config(struct GA_session* session, GA_json** config
  * :param settings: The new :ref:`settings` values.
  * :param call: Destination for the resulting GA_auth_handler.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``settings`` will be emptied when the call completes.
  */
-GDK_API int GA_change_settings(struct GA_session* session, const GA_json* settings, struct GA_auth_handler** call);
+GDK_API int GA_change_settings(struct GA_session* session, GA_json* settings, struct GA_auth_handler** call);
 
 /**
  * Get current wallet settings.
@@ -806,9 +908,11 @@ GDK_API int GA_destroy_auth_handler(struct GA_auth_handler* call);
  * :param twofactor_details: The two factor method and associated data such as an email address. :ref:`twofactor-detail`
  * :param call: Destination for the resulting GA_auth_handler to perform the action
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``twofactor_details`` will be emptied when the call completes.
  */
 GDK_API int GA_change_settings_twofactor(
-    struct GA_session* session, const char* method, const GA_json* twofactor_details, struct GA_auth_handler** call);
+    struct GA_session* session, const char* method, GA_json* twofactor_details, struct GA_auth_handler** call);
 
 /**
  * Request to begin the two factor authentication reset process.
@@ -864,9 +968,40 @@ GDK_API int GA_twofactor_cancel_reset(struct GA_session* session, struct GA_auth
  * :param limit_details: Details of the new :ref:`transaction-limits`
  * :param call: Destination for the resulting GA_auth_handler to perform the change.
  *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``limit_details`` will be emptied when the call completes.
  */
 GDK_API int GA_twofactor_change_limits(
-    struct GA_session* session, const GA_json* limit_details, struct GA_auth_handler** call);
+    struct GA_session* session, GA_json* limit_details, struct GA_auth_handler** call);
+
+/**
+ * Encode CBOR into (potentially multi-part) UR-encoding.
+ *
+ * :param session: The session to use.
+ * :param details: :ref:`bcur-encode` containing the CBOR data to encode.
+ * :param call: Destination for the resulting GA_auth_handler to complete the action.
+ *|     The call handlers result is :ref:`bcur-encoded`.
+ *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
+ */
+GDK_API int GA_bcur_encode(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
+
+/**
+ * Decode (potentially multi-part) UR-encoded data to CBOR.
+ *
+ * :param session: The session to use.
+ * :param details: :ref:`bcur-decode` containing the the first URI to decode.
+ * :param call: Destination for the resulting GA_auth_handler to complete the action.
+ *|     The call handlers result is :ref:`bcur-decoded`.
+ *|     Returned GA_auth_handler should be freed using `GA_destroy_auth_handler`.
+ *
+ * For multi-part data, the call hander will request further parts using
+ * ``"request_code"`` with a method of ``"data"``. see: `auth-handler-status`.
+ *
+ * .. note:: When calling from C/C++, the parameter ``details`` will be emptied when the call completes.
+ */
+GDK_API int GA_bcur_decode(struct GA_session* session, GA_json* details, struct GA_auth_handler** call);
 
 #ifndef SWIG
 /**

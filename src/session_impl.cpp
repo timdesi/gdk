@@ -1,9 +1,10 @@
 #include "session_impl.hpp"
+#include "boost_wrapper.hpp"
 #include "exception.hpp"
-#include "ga_lightning.hpp"
 #include "ga_rust.hpp"
 #include "ga_session.hpp"
 #include "ga_tor.hpp"
+#include "ga_tx.hpp"
 #include "http_client.hpp"
 #include "logging.hpp"
 #include "signer.hpp"
@@ -25,6 +26,17 @@ namespace sdk {
 
     } // namespace
 
+    struct io_context_and_guard {
+        io_context_and_guard()
+            : m_io()
+            , m_work_guard(boost::asio::make_work_guard(m_io))
+        {
+        }
+
+        boost::asio::io_context m_io;
+        boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_work_guard;
+    };
+
     std::shared_ptr<session_impl> session_impl::create(const nlohmann::json& net_params)
     {
         auto defaults = network_parameters::get(net_params.value("name", std::string()));
@@ -33,16 +45,12 @@ namespace sdk {
         if (np.is_electrum()) {
             return std::make_shared<ga_rust>(std::move(np));
         }
-        if (np.is_lightning()) {
-            return std::make_shared<ga_lightning>(std::move(np));
-        }
         return std::make_shared<ga_session>(std::move(np));
     }
 
     session_impl::session_impl(network_parameters&& net_params)
         : m_net_params(net_params)
-        , m_io()
-        , m_work_guard(boost::asio::make_work_guard(m_io))
+        , m_io(std::make_unique<io_context_and_guard>())
         , m_user_proxy(socksify(m_net_params.get_json().value("proxy", std::string())))
         , m_notification_handler(nullptr)
         , m_notification_context(nullptr)
@@ -52,12 +60,12 @@ namespace sdk {
             // Enable internal tor controller
             m_tor_ctrl = tor_controller::get_shared_ref();
         }
-        m_run_thread = std::thread([this] { m_io.run(); });
+        m_run_thread = std::thread([this] { m_io->m_io.run(); });
     }
 
     session_impl::~session_impl()
     {
-        no_std_exception_escape([this] { m_work_guard.reset(); }, "session_impl dtor(1)");
+        no_std_exception_escape([this] { m_io->m_work_guard.reset(); }, "session_impl dtor(1)");
         no_std_exception_escape([this] { m_run_thread.join(); }, "session_impl dtor(2)");
     }
 
@@ -121,7 +129,7 @@ namespace sdk {
 
             std::shared_ptr<http_client> client;
             auto&& get = [&] {
-                client = make_http_client(m_io, ssl_ctx.get());
+                client = make_http_client(m_io->m_io, ssl_ctx.get());
                 GDK_RUNTIME_ASSERT(client != nullptr);
 
                 const auto verb = boost::beast::http::string_to_verb(params["method"]);
@@ -160,23 +168,25 @@ namespace sdk {
         return config;
     }
 
-    nlohmann::json session_impl::refresh_assets(const nlohmann::json& params)
+    void session_impl::refresh_assets(const nlohmann::json& params)
     {
         GDK_RUNTIME_ASSERT(m_net_params.is_liquid());
 
         nlohmann::json p = params;
 
+        auto session_signer = get_signer();
+        if (session_signer != nullptr) {
+            GDK_RUNTIME_ASSERT(!p.contains("xpub"));
+            p["xpub"] = session_signer->get_master_bip32_xpub();
+        }
+
         p["config"] = get_registry_config();
 
-        nlohmann::json result;
         try {
-            result = rust_call("refresh_assets", p);
+            rust_call("refresh_assets", p);
         } catch (const std::exception& ex) {
             GDK_LOG_SEV(log_level::error) << "error fetching assets: " << ex.what();
-            result = { { "assets", nlohmann::json::object() }, { "icons", nlohmann::json::object() },
-                { "error", ex.what() } };
         }
-        return result;
     }
 
     nlohmann::json session_impl::get_assets(const nlohmann::json& params)
@@ -185,7 +195,15 @@ namespace sdk {
 
         nlohmann::json p = params;
 
-        p["xpub"] = get_nonnull_signer()->get_master_bip32_xpub();
+        // We only need to set the xpub if we're accessing the registry cache,
+        // which in turn only happens if we're querying via asset ids.
+        if (p.contains("assets_id")) {
+            auto session_signer = get_signer();
+            if (session_signer != nullptr) {
+                p["xpub"] = session_signer->get_master_bip32_xpub();
+            }
+        }
+
         p["config"] = get_registry_config();
 
         try {
@@ -259,9 +277,10 @@ namespace sdk {
         const std::string& master_chain_code_hex, const std::string& /*gait_path_hex*/, bool /*supports_csv*/)
     {
         // Default impl just returns the wallet hash; registration is only meaningful in multisig
-        return { { "wallet_hash_id", get_wallet_hash_id(m_net_params, master_chain_code_hex, master_pub_key_hex) } };
+        return get_wallet_hash_ids(m_net_params, master_chain_code_hex, master_pub_key_hex);
     }
 
+    // TODO: Remove this from all session types once tx creation is shared
     nlohmann::json session_impl::login(std::shared_ptr<signer> /*signer*/)
     {
         GDK_RUNTIME_ASSERT(false); // Only used by rust until it supports HWW
@@ -278,11 +297,7 @@ namespace sdk {
         // Overriden for ga_rust
     }
 
-    nlohmann::json session_impl::get_subaccount_xpub(uint32_t /*subaccount*/)
-    {
-        // Overriden for ga_rust
-        return nlohmann::json();
-    }
+    std::string session_impl::get_subaccount_type(uint32_t subaccount) { return get_subaccount(subaccount).at("type"); }
 
     bool session_impl::discover_subaccount(const std::string& /*xpub*/, const std::string& /*type*/)
     {
@@ -308,16 +323,201 @@ namespace sdk {
         // Overriden for multisig
     }
 
-    nlohmann::json session_impl::get_scriptpubkey_data(byte_span_t /*scriptpubkey*/)
+    nlohmann::json session_impl::get_scriptpubkey_data(byte_span_t /*scriptpubkey*/) { return nlohmann::json(); }
+
+    nlohmann::json session_impl::get_address_data(const nlohmann::json& /*details*/)
     {
-        // Overriden for multisig
+        GDK_RUNTIME_ASSERT(false); // Only used by rust
         return nlohmann::json();
     }
 
-    nlohmann::json session_impl::psbt_get_details(const nlohmann::json& /*details*/)
+    nlohmann::json session_impl::psbt_get_details(const nlohmann::json& details)
     {
-        // Overriden for multisig
-        return nlohmann::json();
+        const bool is_liquid = m_net_params.is_liquid();
+        const auto psbt = psbt_from_base64(details.at("psbt"));
+        const auto tx = psbt_extract_tx(psbt);
+
+        nlohmann::json::array_t inputs;
+        inputs.reserve(tx->num_inputs);
+        for (size_t i = 0; i < tx->num_inputs; ++i) {
+            const std::string txhash_hex = b2h_rev(tx->inputs[i].txhash);
+            const uint32_t vout = tx->inputs[i].index;
+            for (const auto& utxo : details.at("utxos")) {
+                if (utxo.value("txhash", std::string()) == txhash_hex && utxo.at("pt_idx") == vout) {
+                    inputs.emplace_back(std::move(utxo));
+                    break;
+                }
+            }
+        }
+
+        nlohmann::json::array_t outputs;
+        outputs.reserve(tx->num_outputs);
+        for (size_t i = 0; i < tx->num_outputs; ++i) {
+            const auto& o = tx->outputs[i];
+            if (!o.script_len) {
+                continue; // Liquid fee
+            }
+            const auto scriptpubkey = gsl::make_span(o.script, o.script_len);
+            auto output_data = get_scriptpubkey_data(scriptpubkey);
+            if (output_data.empty()) {
+                continue; // Scriptpubkey does not belong the wallet
+            }
+            if (is_liquid) {
+                const auto unblinded = unblind_output(*this, tx, i);
+                if (unblinded.contains("error")) {
+                    GDK_LOG_SEV(log_level::warning) << "output " << i << ": " << unblinded.at("error");
+                    continue; // Failed to unblind
+                }
+                output_data.update(unblinded);
+            }
+            outputs.emplace_back(output_data);
+        }
+
+        return nlohmann::json{ { "inputs", std::move(inputs) }, { "outputs", std::move(outputs) } };
+    }
+
+    void session_impl::create_transaction(nlohmann::json& details) { create_ga_transaction(*this, details); }
+
+    nlohmann::json session_impl::psbt_sign(const nlohmann::json& details)
+    {
+        const bool is_liquid = m_net_params.is_liquid();
+        const bool is_electrum = m_net_params.is_electrum();
+        const auto psbt = psbt_from_base64(details.at("psbt"));
+        auto tx = psbt_extract_tx(psbt);
+
+        // Get our inputs in order, with UTXO details for signing,
+        // or a "skip_signing" indicator if they aren't ours.
+        std::vector<nlohmann::json> inputs;
+        inputs.reserve(tx->num_inputs);
+        size_t num_sigs_required = 0;
+        for (size_t i = 0; i < tx->num_inputs; ++i) {
+            const std::string txhash_hex = b2h_rev(tx->inputs[i].txhash);
+            const uint32_t vout = tx->inputs[i].index;
+            nlohmann::json input_utxo({ { "skip_signing", true } });
+            for (const auto& utxo : details.at("utxos")) {
+                if (!utxo.empty() && utxo.at("txhash") == txhash_hex && utxo.at("pt_idx") == vout) {
+                    input_utxo = utxo;
+                    const uint32_t sighash = psbt->inputs[i].sighash;
+                    input_utxo["user_sighash"] = sighash ? sighash : WALLY_SIGHASH_ALL;
+                    ++num_sigs_required;
+                    break;
+                }
+            }
+            inputs.emplace_back(input_utxo);
+        }
+
+        nlohmann::json::array_t utxos;
+        if (!num_sigs_required) {
+            // No signatures required, return the PSBT unchanged
+            return { { "utxos", utxos }, { "psbt", details.at("psbt") } };
+        }
+        const bool is_partial = num_sigs_required != tx->num_inputs;
+        if (!is_electrum && is_partial) {
+            // Multisig partial signing. Ensure all inputs to be signed are segwit
+            for (const auto& utxo : inputs) {
+                if (json_get_value(utxo, "address_type") == "p2sh") {
+                    throw user_error("Non-segwit utxos cannnot be used with psbt_sign");
+                }
+            }
+        }
+
+        // FIXME: refactor to use HWW path
+        const auto flags = tx_flags(is_liquid);
+        nlohmann::json tx_details = { { "transaction", tx_to_hex(tx, flags) } };
+        const auto signatures = sign_ga_transaction(*this, tx_details, inputs).first;
+
+        const bool is_low_r = get_signer()->supports_low_r();
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            const auto& utxo = inputs.at(i);
+            const std::string& signature = signatures.at(i);
+            if (utxo.value("skip_signing", false)) {
+                GDK_RUNTIME_ASSERT(signature.empty());
+                continue;
+            }
+            add_input_signature(tx, i, utxo, signature, is_low_r);
+        }
+
+        utxos.reserve(inputs.size());
+        for (auto& utxo : inputs) {
+            if (!utxo.value("skip_signing", false)) {
+                utxos.emplace_back(std::move(utxo));
+            }
+        }
+        nlohmann::json result = { { "utxos", std::move(utxos) } };
+
+        if (!is_electrum) {
+            // Multisig
+            std::vector<byte_span_t> old_scripts;
+            std::vector<std::vector<unsigned char>> new_scripts;
+            auto&& restore_tx = [&tx, &old_scripts] {
+                for (size_t i = 0; i < old_scripts.size(); ++i) {
+                    tx->inputs[i].script = (unsigned char*)old_scripts[i].data();
+                    tx->inputs[i].script_len = old_scripts[i].size();
+                }
+                old_scripts.clear();
+            };
+            auto restore_tx_on_throw = gsl::finally([&restore_tx] { restore_tx(); });
+
+            if (is_partial) {
+                // Partial signing. For p2sh-wrapped inputs, replace
+                // input scriptSigs with redeemScripts before passing to the
+                // Green backend. The backend checks the redeemScript for
+                // segwit-ness to verify the tx is segwit before signing.
+                old_scripts.reserve(tx->num_inputs);
+                new_scripts.reserve(tx->num_inputs);
+                for (size_t i = 0; i < tx->num_inputs; ++i) {
+                    auto& txin = tx->inputs[i];
+                    old_scripts.emplace_back(gsl::make_span(txin.script, txin.script_len));
+                    new_scripts.emplace_back(psbt_get_input_redeem_script(psbt, i));
+                    auto& redeem_script = new_scripts.back();
+                    if (!redeem_script.empty()) {
+                        redeem_script = script_push_from_bytes(redeem_script);
+                        txin.script = redeem_script.data();
+                        txin.script_len = redeem_script.size();
+                    }
+                }
+            }
+
+            // We pass the UTXOs in (under a dummy asset key which is unused)
+            // for housekeeping purposes such as internal cache updates.
+            nlohmann::json u = { { "dummy", std::move(result["utxos"]) } };
+            tx_details = { { "transaction", tx_to_hex(tx, flags) }, { "utxos", std::move(u) } };
+            restore_tx();
+
+            if (details.contains("blinding_nonces")) {
+                tx_details["blinding_nonces"] = details["blinding_nonces"];
+            }
+            auto ret = service_sign_transaction(tx_details, nlohmann::json::object());
+            tx = tx_from_hex(ret.at("transaction"), flags);
+            result["utxos"] = std::move(tx_details["utxos"]["dummy"]);
+        }
+
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            const auto& utxo = inputs.at(i);
+            const std::string& signature = signatures.at(i);
+            GDK_RUNTIME_ASSERT(signature.empty() == !utxo.empty());
+            if (utxo.empty()) {
+                /* Finalize the input, but don't remove its finalization data.
+                 * FIXME: see comment below on partial signing */
+                GDK_VERIFY(wally_psbt_set_input_final_witness(psbt.get(), i, tx->inputs[i].witness));
+                GDK_VERIFY(wally_psbt_set_input_final_scriptsig(
+                    psbt.get(), i, tx->inputs[i].script, tx->inputs[i].script_len));
+            }
+        }
+
+        /* For partial signing, we must keep the redeem script in the PSBT
+         * for inputs that we have finalized, despite this breaking the spec
+         * behaviour. FIXME: Use an extension field for this, since some
+         * inputs may have been already properly finalized before we sign.
+         */
+        uint32_t b64_flags = is_partial ? WALLY_PSBT_SERIALIZE_FLAG_REDUNDANT : 0;
+        result["psbt"] = psbt_to_base64(psbt, b64_flags);
+        return result;
+    }
+
+    nlohmann::json session_impl::user_sign_transaction(const nlohmann::json& details)
+    {
+        return sign_ga_transaction(*this, details);
     }
 
     void session_impl::save_cache()
@@ -411,6 +611,18 @@ namespace sdk {
         return *m_user_pubkeys;
     }
 
+    amount session_impl::get_dust_threshold(const std::string& asset_id_hex) const
+    {
+        if (m_net_params.is_liquid() && asset_id_hex != m_net_params.get_policy_asset()) {
+            return amount(1); // No dust threshold for assets
+        }
+        // BTC and L-BTC use the same threshold. For Liquid, txs are ~10x larger,
+        // but fees are 10x smaller. Fees, OP_RETURN and blinded outputs are not
+        // subject to the dust limit. As we only create blinded output, we only
+        // respect the limit to save users fees on L-BTC sends and change.
+        return amount(546);
+    }
+
     nlohmann::json session_impl::sync_transactions(uint32_t /*subaccount*/, unique_pubkeys_and_scripts_t& /*missing*/)
     {
         // Overriden for multisig
@@ -435,6 +647,7 @@ namespace sdk {
 
     std::vector<unsigned char> session_impl::output_script_from_utxo(const nlohmann::json& utxo)
     {
+        GDK_RUNTIME_ASSERT(m_net_params.is_electrum()); // Default impl is single sig
         const std::string addr_type = utxo.at("address_type");
         const auto pubkeys = pubkeys_from_utxo(utxo);
 
@@ -445,6 +658,7 @@ namespace sdk {
 
     std::vector<pub_key_t> session_impl::pubkeys_from_utxo(const nlohmann::json& utxo)
     {
+        GDK_RUNTIME_ASSERT(m_net_params.is_electrum()); // Default impl is single sig
         const uint32_t subaccount = utxo.at("subaccount");
         const uint32_t pointer = utxo.at("pointer");
         const bool is_internal = utxo.at("is_internal");
@@ -452,9 +666,9 @@ namespace sdk {
         return std::vector<pub_key_t>({ get_user_pubkeys().derive(subaccount, pointer, is_internal) });
     }
 
-    nlohmann::json session_impl::gl_call(const char* /*method*/, const nlohmann::json& /*params*/)
+    nlohmann::json session_impl::decrypt_with_pin(const nlohmann::json& /*details*/)
     {
-        // Overriden for ga_lightning
+        GDK_RUNTIME_ASSERT(false);
         return nlohmann::json();
     }
 

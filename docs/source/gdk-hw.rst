@@ -4,7 +4,7 @@ GDK Hardware Wallet Interface
 =============================
 
 This section details the format of data requests from hardware wallet
-interation during resolution of GA_auth_handler processing when
+interaction during resolution of GA_auth_handler processing when
 `GA_auth_handler_get_status` returns the status ``"resolve_code"`` with
 a ``"required_data"`` element present.
 
@@ -104,13 +104,16 @@ a message using the given path.
      {
        "message": "A text message to sign",
        "path": [ 1195487518 ],
-       "use_ae_protocol": false
+       "use_ae_protocol": false,
+       "create_recoverable_sig": false
      }
 
 :message: The message to be utf-8 encoded and signed.
 :path: The path from the wallet's master key to the key that the message should be signed with.
 :use_ae_protocol: ``true`` if the hardware device advertises Anti-Exfil support and it should
     be used for signing, ``false`` otherwise.
+:create_recoverable_sig: ``true`` if the signature to produce should be recoverable.
+    Default ``false``.
 
 **Expected response**:
 
@@ -120,7 +123,8 @@ a message using the given path.
        "signature": "304402207c673ef4255873cf095016c98c4982cea9a5133060b66a380f1bf3880e54f6c8022056fd731cbd44cd96366212439717a888470ed481628cba81195c557d5c4fc39c"
      }
 
-:signature: The hex-encoded ECDSA signature in DER encoding corresponding to the given message.
+:signature: The ECDSA signature corresponding to the given message.
+    If ``"create_recoverable_sig"`` is ``false`` it must use DER encoding, otherwise it must be encoded in hex.
 
 
 .. _hw-action-get-blinding-public-keys:
@@ -151,6 +155,8 @@ compute blinding public keys from wallet scripts.
 
 :public_keys: An array of hex-encoded compressed public keys for blinding the given scripts.
 
+
+.. _hw-action-get-blinding-nonces:
 
 Hardware Get Blinding Nonces Action
 -----------------------------------
@@ -187,3 +193,64 @@ and shared public keys.
 :public_keys: An array of hex-encoded compressed public keys for blinding the given scripts.
     Must be present if ``"blinding_keys_required"`` was ``true`` in the request, and absent otherwise.
 :nonces: An array of hex-encoded 256 bit blinding nonces.
+
+
+.. _hw-action-get-blinding-factors:
+
+Hardware Get Blinding Factors Action
+------------------------------------
+
+When ``"action"`` is ``"get_blinding_factors"``, this describes a request to
+compute asset (ABF) and value (VBF) blinding factors for the given transaction
+outputs.
+
+.. note:: This action is only returned when using the Liquid network.
+
+.. code-block:: json
+
+    {
+      "is_partial": false,
+      "transaction_outputs": [],
+      "used_utxos": [
+        {
+          "txhash": "797c40d53c4a5372303f765281bb107c40ed9618646c46851514ff0483bee894"
+          "pt_idx": 2,
+        },
+        {
+          "txhash": "9c7cffca5711968a22b8a03cc6d17224d0d85d884a4d2f638371b6fd6d59afdb"
+          "pt_idx": 1,
+        }
+      ]
+    }
+
+:is_partial: ``true`` if the transaction to be blinded is incomplete, ``false`` otherwise.
+:transaction_outputs: The transaction output details for the outputs to be blinded, in
+    the format returned by `GA_create_transaction`. Any output with a ``"blinding_key"``
+    key present requires blinding factors to be returned. When ``"is_partial"``
+    is ``false``, the final vbf need not be returned. An empty string should be
+    returned for blinding factors that are not required. It is not an error to
+    provide blinding factors that are not required; they will be ignored.
+:used_utxos: An array of prevout txids and their indices, supplied so the
+    request handler can compute hashPrevouts for deterministic blinding.
+
+**Expected response**:
+
+.. code-block:: json
+
+    {
+      "amountblinders": [
+        "ce8259bd2e7fa7d6695ade7cf8481919612df28e164a9f89cd96aace69a78bb9",
+        ""
+      ],
+      "assetblinders": [
+        "5ca806862967cde0d51950dd4e9add68e7cae8cda928750037fca1fb9cfc9e58",
+        "5748810a8d2c4d87ea8c3038fb71369d8d9c85f09cfa4f6412359910fce93616"
+      ]
+    }
+
+:amountblinders: An array of hex-encoded, display format value blinding factors
+    (VBFs) to blind the transaction output values. Any non-required values
+    should be returned as empty strings.
+:assetblinders: An array of hex-encoded, display format asset blinding factors
+    (ABFs) to blind the transaction output assets. Any non-required values
+    should be returned as empty strings.

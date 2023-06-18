@@ -16,7 +16,6 @@
 #include "logging.hpp"
 #include "network_parameters.hpp"
 #include "signer.hpp"
-#include "socks_client.hpp"
 #include "utils.hpp"
 
 using namespace std::literals;
@@ -56,6 +55,13 @@ namespace sdk {
         if (!global_config.contains("registrydir")) {
             const std::string datadir = global_config["datadir"];
             global_config.emplace("registrydir", datadir + "/registry");
+        }
+        if (!global_config.contains("enable_ss_liquid_hww")) {
+            // "enable_ss_liquid_hww" is a development setting, to enable
+            // hardware wallet support for single sig sessions.
+            // TODO: Remove this setting and all references to it
+            //       once HWW support is fully tested.
+            global_config.emplace("enable_ss_liquid_hww", false);
         }
 
         // Set up logging. Default to fatal logging, effectively 'none',
@@ -225,11 +231,11 @@ namespace sdk {
         });
     }
 
-    nlohmann::json session::refresh_assets(const nlohmann::json& params)
+    void session::refresh_assets(const nlohmann::json& params)
     {
-        return exception_wrapper([&] {
+        exception_wrapper([&] {
             auto p = get_nonnull_impl();
-            return p->refresh_assets(params);
+            p->refresh_assets(params);
         });
     }
 
@@ -323,6 +329,14 @@ namespace sdk {
         });
     }
 
+    nlohmann::json session::decrypt_with_pin(const nlohmann::json& details)
+    {
+        return exception_wrapper([&] {
+            auto p = get_nonnull_impl();
+            return p->decrypt_with_pin(details);
+        });
+    }
+
     void session::disable_all_pin_logins()
     {
         return exception_wrapper([&] {
@@ -405,14 +419,6 @@ namespace sdk {
     {
         auto p = get_nonnull_impl();
         return p->get_network_parameters(); // Note no exception_wrapper
-    }
-
-    nlohmann::json session::gl_call(const char* method, const nlohmann::json& params)
-    {
-        return exception_wrapper([&] {
-            auto p = get_nonnull_impl();
-            return p->gl_call(method, params);
-        });
     }
 
     session::impl_ptr session::get_nonnull_impl() const

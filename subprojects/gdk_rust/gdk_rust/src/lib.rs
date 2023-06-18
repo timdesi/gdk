@@ -1,34 +1,28 @@
 #[macro_use]
 extern crate serde_json;
 
-#[macro_use]
-extern crate log;
-
 pub mod error;
-mod serialize;
+mod exchange_rates;
 
-use crate::serialize::*;
 use gdk_common::wally::{make_str, read_str};
 use serde_json::Value;
 
 use std::ffi::CString;
-use std::fmt;
+use std::io::Write;
 use std::os::raw::c_char;
-use std::sync::Once;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::str::FromStr;
+use std::sync::{Arc, Once};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use gdk_common::model::{
-    CreateAccountOpt, GetNextAccountOpt, GetTransactionsOpt, InitParam, RenameAccountOpt,
-    SPVDownloadHeadersParams, SPVVerifyTxParams, SetAccountHiddenOpt, UpdateAccountOpt,
-};
+use gdk_common::model::{InitParam, SPVDownloadHeadersParams, SPVVerifyTxParams};
 
 use crate::error::Error;
-use gdk_electrum::error::Error as ElectrumError;
-use gdk_electrum::pset::{self, ExtractTxParam, FromTxParam, MergeTxParam};
-use gdk_electrum::{determine_electrum_url, headers, ElectrumSession};
-use log::{LevelFilter, Metadata, Record};
+use gdk_common::exchange_rates::{ExchangeRatesCache, ExchangeRatesCacher};
+use gdk_common::log::{self, debug, info, LevelFilter, Metadata, Record};
+use gdk_common::session::{JsonError, Session};
+use gdk_common::ureq;
+use gdk_electrum::{headers, ElectrumSession, NativeNotif};
 use serde::Serialize;
-use std::str::FromStr;
 
 pub const GA_OK: i32 = 0;
 pub const GA_ERROR: i32 = -1;
@@ -36,8 +30,6 @@ pub const GA_NOT_AUTHORIZED: i32 = -5;
 
 pub struct GdkSession {
     pub backend: GdkBackend,
-    pub last_xr_fetch: std::time::SystemTime,
-    pub last_xr: Option<Vec<Ticker>>,
 }
 
 pub enum GdkBackend {
@@ -46,7 +38,47 @@ pub enum GdkBackend {
     Greenlight(GreenlightSession),
 }
 
-pub struct GreenlightSession {}
+#[derive(Default)]
+pub struct GreenlightSession {
+    xr_cache: ExchangeRatesCache,
+}
+
+impl ExchangeRatesCacher for GreenlightSession {
+    fn xr_cache(&self) -> ExchangeRatesCache {
+        Arc::clone(&self.xr_cache)
+    }
+}
+
+impl Session for GreenlightSession {
+    fn new(_network_parameters: gdk_common::NetworkParameters) -> Result<Self, JsonError> {
+        todo!()
+    }
+
+    fn native_notification(&mut self) -> &mut NativeNotif {
+        todo!()
+    }
+
+    fn network_parameters(&self) -> &gdk_common::NetworkParameters {
+        todo!()
+    }
+
+    fn build_request_agent(&self) -> Result<ureq::Agent, ureq::Error> {
+        todo!()
+    }
+
+    fn handle_call(&mut self, method: &str, _input: Value) -> Result<Value, JsonError> {
+        Err(Error::GreenlightMethodNotFound(method.to_string()).into())
+    }
+}
+
+impl From<Error> for JsonError {
+    fn from(e: Error) -> Self {
+        JsonError {
+            message: e.to_string(),
+            error: e.to_gdk_code(),
+        }
+    }
+}
 
 //
 // Session & account management
@@ -62,14 +94,14 @@ pub extern "C" fn GDKRUST_create_session(
     let network: Value = match serde_json::from_str(&read_str(network)) {
         Ok(x) => x,
         Err(err) => {
-            error!("error: {:?}", err);
+            log::error!("error: {:?}", err);
             return GA_ERROR;
         }
     };
 
     match create_session(&network) {
         Err(err) => {
-            error!("create_session error: {}", err);
+            log::error!("create_session error: {}", err);
             GA_ERROR
         }
         Ok(session) => {
@@ -109,74 +141,31 @@ fn init_logging(level: LevelFilter) {
 fn create_session(network: &Value) -> Result<GdkSession, Value> {
     info!("create_session {:?}", network);
     if !network.is_object() || !network.as_object().unwrap().contains_key("server_type") {
-        error!("Expected network to be an object with a server_type key");
+        log::error!("Expected network to be an object with a server_type key");
         return Err(GA_ERROR.into());
     }
 
     let parsed_network = serde_json::from_value(network.clone());
     if let Err(msg) = parsed_network {
-        error!("Error parsing network {}", msg);
+        log::error!("Error parsing network {}", msg);
         return Err(GA_ERROR.into());
     }
 
     let parsed_network = parsed_network.unwrap();
 
-    let proxy = network["proxy"].as_str();
-
     let backend = match network["server_type"].as_str() {
         // Some("rpc") => GDKRUST_session::Rpc( GDKRPC_session::create_session(parsed_network.unwrap()).unwrap() ),
-        Some("greenlight") => GdkBackend::Greenlight(GreenlightSession {}),
+        Some("greenlight") => GdkBackend::Greenlight(GreenlightSession::default()),
         Some("electrum") => {
-            let url = determine_electrum_url(&parsed_network).map_err(|x| json!(x))?;
-
-            let session = ElectrumSession::create_session(parsed_network, proxy, url);
+            let session = ElectrumSession::new(parsed_network)?;
             GdkBackend::Electrum(session)
         }
         _ => return Err(json!("server_type invalid")),
     };
-    // some time in the past
-    let last_xr_fetch = SystemTime::now() - Duration::from_secs(1000);
     let gdk_session = GdkSession {
         backend,
-        last_xr_fetch,
-        last_xr: None,
     };
     Ok(gdk_session)
-}
-
-fn fetch_cached_exchange_rates(sess: &mut GdkSession) -> Option<Vec<Ticker>> {
-    if SystemTime::now() < (sess.last_xr_fetch + Duration::from_secs(60)) {
-        debug!("hit exchange rate cache");
-    } else {
-        info!("missed exchange rate cache");
-        let (agent, is_mainnet) = match sess.backend {
-            GdkBackend::Electrum(ref s) => (s.build_request_agent(), s.network.mainnet),
-            GdkBackend::Greenlight(ref _s) => (
-                Err(gdk_electrum::error::Error::Generic(
-                    "build_request_agent not yet implemented".to_string(),
-                )),
-                false,
-            ),
-        };
-        if let Ok(agent) = agent {
-            let rates = if is_mainnet {
-                fetch_exchange_rates(agent)
-            } else {
-                vec![Ticker {
-                    pair: Pair::new(Currency::BTC, Currency::USD),
-                    rate: 1.1,
-                }]
-            };
-            // still record time even if we get no results
-            sess.last_xr_fetch = SystemTime::now();
-            if !rates.is_empty() {
-                // only set last_xr if we got new non-empty rates
-                sess.last_xr = Some(rates);
-            }
-        }
-    }
-
-    sess.last_xr.clone()
 }
 
 #[no_mangle]
@@ -186,27 +175,48 @@ pub extern "C" fn GDKRUST_call_session(
     input: *const c_char,
     output: *mut *const c_char,
 ) -> i32 {
-    let method = read_str(method);
-    let input: Value = match serde_json::from_str(&read_str(input)) {
-        Ok(x) => x,
-        Err(err) => {
-            error!("error: {:?}", err);
-            return GA_ERROR;
-        }
-    };
-
     if ptr.is_null() {
         return GA_ERROR;
     }
     let sess: &mut GdkSession = unsafe { &mut *(ptr as *mut GdkSession) };
+    let method = read_str(method);
+    let input = read_str(input);
+
+    match call_session(sess, &method, &input) {
+        Ok(value) => {
+            unsafe { *output = make_str(value.to_string()) };
+            GA_OK
+        }
+
+        Err(err) => {
+            log::error!("error: {:?}", err);
+
+            let retv = if "id_invalid_pin" == err.error {
+                GA_NOT_AUTHORIZED
+            } else {
+                GA_ERROR
+            };
+
+            unsafe { *output = make_str(to_string(&err)) };
+            retv
+        }
+    }
+}
+
+fn call_session(sess: &mut GdkSession, method: &str, input: &str) -> Result<Value, JsonError> {
+    let input = serde_json::from_str(input)?;
 
     if method == "exchange_rates" {
-        let rates = fetch_cached_exchange_rates(sess).unwrap_or_default();
-        let s = make_str(tickers_to_json(rates).to_string());
-        unsafe {
-            *output = s;
-        }
-        return GA_OK;
+        let params = serde_json::from_value(input)?;
+
+        let ticker = match sess.backend {
+            GdkBackend::Electrum(ref mut s) => exchange_rates::fetch_cached(s, &params),
+            GdkBackend::Greenlight(ref mut s) => exchange_rates::fetch_cached(s, &params),
+        }?;
+
+        let rate = ticker.map(|t| format!("{:.8}", t.rate)).unwrap_or_default();
+
+        return Ok(json!({ "currencies": { params.currency.to_string(): rate } }));
     }
 
     // Redact inputs containing private data
@@ -214,11 +224,13 @@ pub extern "C" fn GDKRUST_call_session(
         "login",
         "register_user",
         "encrypt_with_pin",
+        "decrypt_with_pin",
         "create_subaccount",
         "credentials_from_pin_data",
+        "set_master_blinding_key",
     ];
     let input_str = format!("{:?}", &input);
-    let input_redacted = if methods_to_redact_in.contains(&method.as_str())
+    let input_redacted = if methods_to_redact_in.contains(&method)
         || input_str.contains("pin")
         || input_str.contains("mnemonic")
         || input_str.contains("xprv")
@@ -229,13 +241,15 @@ pub extern "C" fn GDKRUST_call_session(
     };
 
     info!("GDKRUST_call_session handle_call {} input {:?}", method, input_redacted);
+
     let res = match sess.backend {
-        GdkBackend::Electrum(ref mut s) => handle_session_call(s, &method, input),
-        GdkBackend::Greenlight(ref mut s) => handle_gl_call(s, &method, input),
+        GdkBackend::Electrum(ref mut s) => s.handle_call(&method, input),
+        GdkBackend::Greenlight(ref mut s) => s.handle_call(&method, input),
     };
 
-    let methods_to_redact_out = vec!["credentials_from_pin_data"];
-    let mut output_redacted = if methods_to_redact_out.contains(&method.as_str()) {
+    let methods_to_redact_out =
+        vec!["credentials_from_pin_data", "decrypt_with_pin", "get_master_blinding_key"];
+    let mut output_redacted = if methods_to_redact_out.contains(&method) {
         "redacted".to_string()
     } else {
         format!("{:?}", res)
@@ -243,22 +257,7 @@ pub extern "C" fn GDKRUST_call_session(
     output_redacted.truncate(200);
     info!("GDKRUST_call_session {} output {:?}", method, output_redacted);
 
-    let (s, ret) = match res {
-        Ok(ref val) => (val.to_string(), GA_OK),
-        Err(ref e) => {
-            let ret_val = match e {
-                Error::Electrum(ElectrumError::InvalidPin) => GA_NOT_AUTHORIZED,
-                _ => GA_ERROR,
-            };
-            let json_error = build_error(&method, e);
-            (json_error, ret_val)
-        }
-    };
-    let s = make_str(s);
-    unsafe {
-        *output = s;
-    }
-    ret
+    res
 }
 
 #[no_mangle]
@@ -511,12 +510,6 @@ pub extern "C" fn GDKRUST_destroy_session(ptr: *mut libc::c_void) {
     }
 }
 
-#[derive(serde::Serialize)]
-struct JsonError {
-    message: String,
-    error: String,
-}
-
 fn build_error(_method: &str, error: &Error) -> String {
     let message = error.to_string();
     let error = error.to_gdk_code();
@@ -565,18 +558,6 @@ fn handle_call(method: &str, input: &str) -> Result<String, Error> {
             // TODO: read more initialization params
             to_string(&json!("".to_string()))
         }
-        "psbt_extract_tx" => {
-            let param: ExtractTxParam = serde_json::from_str(input)?;
-            to_string(&pset::extract_tx(&param)?)
-        }
-        "psbt_from_tx" => {
-            let param: FromTxParam = serde_json::from_str(input)?;
-            to_string(&pset::from_tx(&param)?)
-        }
-        "psbt_merge_tx" => {
-            let param: MergeTxParam = serde_json::from_str(input)?;
-            to_string(&pset::merge_tx(&param)?)
-        }
         "spv_verify_tx" => {
             let param: SPVVerifyTxParams = serde_json::from_str(input)?;
             to_string(&headers::spv_verify_tx(&param)?.as_i32())
@@ -586,7 +567,7 @@ fn handle_call(method: &str, input: &str) -> Result<String, Error> {
             to_string(&headers::download_headers(&param)?)
         }
         "refresh_assets" => {
-            let param: gdk_registry::RefreshAssetsParam = serde_json::from_str(input)?;
+            let param: gdk_registry::RefreshAssetsParams = serde_json::from_str(input)?;
             to_string(&gdk_registry::refresh_assets(param)?)
         }
         "get_assets" => {
@@ -627,7 +608,8 @@ impl log::Log for SimpleLogger {
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
             let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards");
-            println!(
+            let _ = writeln!(
+                std::io::stdout(),
                 "{:02}.{:03} {} - {}",
                 ts.as_secs() % 60,
                 ts.subsec_millis(),
@@ -638,79 +620,4 @@ impl log::Log for SimpleLogger {
     }
 
     fn flush(&self) {}
-}
-
-#[derive(PartialEq, Eq, Debug, Clone)]
-pub enum Currency {
-    BTC,
-    USD,
-    CAD,
-    // LBTC,
-    Other(String),
-}
-
-impl std::str::FromStr for Currency {
-    type Err = Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Error> {
-        // println!("currency from_str {}", s);
-        if s.len() < 3 {
-            return Err("ticker length less than 3".to_string().into());
-        }
-
-        // TODO: support harder to parse pairs (LBTC?)
-        match s {
-            "USD" => Ok(Currency::USD),
-            "CAD" => Ok(Currency::CAD),
-            "BTC" => Ok(Currency::BTC),
-            "" => Err("empty ticker".to_string().into()),
-            other => Ok(Currency::Other(other.into())),
-        }
-    }
-}
-
-impl fmt::Display for Currency {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Currency::USD => "USD",
-            Currency::CAD => "CAD",
-            Currency::BTC => "BTC",
-            // Currency::LBTC => "LBTC",
-            Currency::Other(ref s) => s,
-        };
-        write!(f, "{}", s)
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Pair((Currency, Currency));
-
-impl Pair {
-    pub fn new(c1: Currency, c2: Currency) -> Pair {
-        Pair((c1, c2))
-    }
-
-    pub fn new_btc(c: Currency) -> Pair {
-        Pair((Currency::BTC, c))
-    }
-
-    pub fn first(&self) -> &Currency {
-        &(self.0).0
-    }
-
-    pub fn second(&self) -> &Currency {
-        &(self.0).1
-    }
-}
-
-impl fmt::Display for Pair {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.first(), self.second())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Ticker {
-    pub pair: Pair,
-    pub rate: f64,
 }

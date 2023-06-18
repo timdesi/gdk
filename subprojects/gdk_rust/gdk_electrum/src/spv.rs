@@ -1,18 +1,23 @@
-use log::warn;
-use rand::seq::SliceRandom;
+use gdk_common::log::warn;
+use gdk_common::rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-use bitcoin::blockdata::constants::{max_target, DIFFCHANGE_INTERVAL, DIFFCHANGE_TIMESPAN};
-use bitcoin::BlockHash;
-use bitcoin::{util::uint::Uint256, util::BitArray, BlockHeader};
 use electrum_client::{Client as ElectrumClient, ElectrumApi};
+use gdk_common::bitcoin::blockdata::constants::{
+    max_target, DIFFCHANGE_INTERVAL, DIFFCHANGE_TIMESPAN,
+};
+use gdk_common::bitcoin::BlockHash;
+use gdk_common::bitcoin::{util::uint::Uint256, util::BitArray, BlockHeader};
+use gdk_common::once_cell::sync::Lazy;
+use gdk_common::{bitcoin, electrum_client};
 
 use gdk_common::network::NetworkParameters;
 
 use crate::error::Error;
 use crate::headers::bitcoin::HeadersChain;
 use crate::interface::ElectrumUrl;
+use crate::session::determine_electrum_url;
 
 const INIT_CHUNK_SIZE: u32 = 5;
 const MAX_CHUNK_SIZE: u32 = 200;
@@ -142,7 +147,7 @@ impl SpvCrossValidator {
 
     fn random_servers(&self, num: usize) -> Vec<ElectrumUrl> {
         let mut servers: Vec<_> = self.servers.iter().collect();
-        servers.shuffle(&mut rand::thread_rng());
+        servers.shuffle(&mut gdk_common::rand::thread_rng());
         servers.into_iter().take(num).cloned().collect()
     }
 }
@@ -390,12 +395,12 @@ impl CrossValidationResult {
     }
 }
 
-lazy_static! {
-    static ref SERVER_LIST_MAINNET: Vec<ElectrumUrl> =
-        parse_server_file(include_str!("servers-mainnet.txt"));
-    static ref SERVER_LIST_TESTNET: Vec<ElectrumUrl> =
-        parse_server_file(include_str!("servers-testnet.txt"));
-}
+static SERVER_LIST_MAINNET: Lazy<Vec<ElectrumUrl>> =
+    Lazy::new(|| parse_server_file(include_str!("servers-mainnet.txt")));
+
+static SERVER_LIST_TESTNET: Lazy<Vec<ElectrumUrl>> =
+    Lazy::new(|| parse_server_file(include_str!("servers-testnet.txt")));
+
 fn parse_server_file(sl: &str) -> Vec<ElectrumUrl> {
     sl.lines().map(FromStr::from_str).collect::<Result<_, _>>().unwrap()
 }
@@ -424,7 +429,7 @@ pub fn get_cross_servers(network: &NetworkParameters) -> Result<Vec<ElectrumUrl>
     }?;
 
     // Don't cross validation against the primary server
-    let primary_server = super::determine_electrum_url(network)?;
+    let primary_server = determine_electrum_url(network)?;
     let primary_url = primary_server.url();
     Ok(servers.into_iter().filter(|s| s.url() != primary_url).collect())
 }

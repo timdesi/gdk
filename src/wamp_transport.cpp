@@ -17,7 +17,6 @@
 #include "exception.hpp"
 #include "http_client.hpp"
 #include "logging.hpp"
-#include "memory.hpp"
 #include "network_parameters.hpp"
 #include "utils.hpp"
 #include "version.h"
@@ -25,6 +24,7 @@
 
 using namespace std::literals;
 namespace asio = boost::asio;
+namespace wlog = websocketpp::log;
 
 namespace ga {
 namespace sdk {
@@ -35,6 +35,67 @@ namespace sdk {
             get_random_bytes(sizeof(b), &b, sizeof(b));
             return b;
         }
+    };
+
+    class websocket_boost_logger {
+    public:
+        static gdk_logger_t& m_log;
+
+        explicit websocket_boost_logger(wlog::channel_type_hint::value hint)
+            : websocket_boost_logger(0, hint)
+        {
+        }
+
+        websocket_boost_logger(wlog::level l, __attribute__((unused)) wlog::channel_type_hint::value hint)
+            : m_level(l)
+        {
+        }
+
+        websocket_boost_logger()
+            : websocket_boost_logger(0, 0)
+        {
+        }
+
+        void set_channels(wlog::level l) { m_level = l; }
+        void clear_channels(wlog::level __attribute__((unused)) l) { m_level = 0; }
+
+        constexpr static auto get_severity_level(wlog::level l)
+        {
+            switch (l) {
+            case wlog::alevel::devel:
+            case wlog::elevel::devel:
+            case wlog::elevel::library:
+                return boost::log::trivial::debug;
+            case wlog::elevel::warn:
+                return boost::log::trivial::warning;
+            case wlog::elevel::rerror:
+                return boost::log::trivial::error;
+            case wlog::elevel::fatal:
+                return boost::log::trivial::fatal;
+            case wlog::elevel::info:
+            default:
+                return boost::log::trivial::info;
+            }
+        }
+
+        void write(wlog::level l, const std::string& s)
+        {
+            if (dynamic_test(l)) {
+                BOOST_LOG_SEV(m_log, get_severity_level(l)) << s;
+            }
+        }
+
+        void write(wlog::level l, char const* s)
+        {
+            if (dynamic_test(l)) {
+                BOOST_LOG_SEV(m_log, get_severity_level(l)) << s;
+            }
+        }
+
+        bool static_test(wlog::level l) const { return (m_level & l) != 0; }
+        bool dynamic_test(wlog::level l) { return (m_level & l) != 0; }
+
+        wlog::level m_level;
     };
 
     struct websocketpp_gdk_config : public websocketpp::config::asio_client {
@@ -325,10 +386,10 @@ namespace sdk {
         if (!proxy.empty()) {
             m_proxy = proxy;
         }
-        const auto current_state = m_state.load();
-        GDK_RUNTIME_ASSERT(current_state != state_t::exited);
+        const auto initial_state = m_state.load();
+        GDK_RUNTIME_ASSERT(initial_state != state_t::exited);
         m_desired_state = new_state;
-        const bool is_noop = new_state == current_state;
+        const bool is_noop = new_state == initial_state;
         locker.unlock();
         m_condition.notify_all();
 
@@ -597,7 +658,7 @@ namespace sdk {
         {
             // TODO: Set m_last_ping_ts whenever we receive a subscription
             unique_unlock unlocker(locker);
-            const auto options = autobahn::wamp_subscribe_options("exact");
+            const autobahn::wamp_subscribe_options options("exact");
             sub = s->subscribe(
                        topic, [fn](const autobahn::wamp_event& e) { fn(wamp_cast_json(e)); }, options)
                       .get();

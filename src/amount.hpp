@@ -13,6 +13,7 @@ namespace sdk {
     class amount final {
     public:
         // Internally, BTC amounts are held as satoshi
+        using signed_value_type = int64_t;
         using value_type = uint64_t;
 
         static constexpr value_type coin_value = 100000000;
@@ -38,14 +39,16 @@ namespace sdk {
         static void strip_non_satoshi_keys(nlohmann::json& amount_json);
 
         // Convert fiat cents to fiat + BTC amounts
-        static nlohmann::json convert_fiat_cents(
-            value_type cents, const std::string& fiat_currency, const std::string& fiat_rate);
+        static nlohmann::json convert_fiat_cents(value_type cents, const std::string& fiat_currency);
 
         // Get fiat cents from a fiat string
         static value_type get_fiat_cents(const std::string& fiat_str);
 
         // Format a number string to include 'dp' decimal places
         static std::string format_amount(const std::string& value_str, size_t dp);
+
+        // Get the maximum number of satoshi for a BTC/L-BTC amount
+        static value_type get_max_satoshi();
 
         amount& operator=(value_type v)
         {
@@ -90,6 +93,7 @@ namespace sdk {
         }
 
         value_type value() const { return m_value; }
+        signed_value_type signed_value() const;
 
     private:
         value_type m_value;

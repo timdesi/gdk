@@ -1,5 +1,7 @@
 use std::string::ToString;
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
@@ -24,6 +26,9 @@ pub enum Error {
     BtcKeyError(#[from] bitcoin::util::key::Error),
 
     #[error(transparent)]
+    BtcNonStandardSigHashType(#[from] bitcoin::blockdata::transaction::NonStandardSighashType),
+
+    #[error(transparent)]
     BtcSecp256k1Error(#[from] bitcoin::secp256k1::Error),
 
     #[error(transparent)]
@@ -41,12 +46,54 @@ pub enum Error {
     #[error("Invalid address")]
     InvalidAddress,
 
+    #[error("Invalid sighash")]
+    InvalidSigHash,
+
+    #[error("Invalid SLIP132 version")]
+    InvalidSlip132Version,
+
+    #[error("Invalid URL: {0}")]
+    InvalidUrl(String),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error("Mismatching descriptor")]
+    MismatchingDescriptor,
+
+    #[error("Mismatching network")]
+    MismatchingNetwork,
+
+    #[error("Mismatching xpub")]
+    MismatchingXpub,
+
+    #[error("Unexpected child number")]
+    UnexpectedChildNumber,
+
+    #[error("Unsupported sighash")]
+    UnsupportedSigHash,
+
+    #[error("Unsupported descriptor")]
+    UnsupportedDescriptor,
+
+    #[error(transparent)]
+    Utf8(#[from] std::str::Utf8Error),
+
+    #[error(transparent)]
+    Sighash(#[from] bitcoin::util::sighash::Error),
+
     #[error("Generic({0})")]
     Generic(String),
 }
 
-pub fn err<R>(str: &str) -> Result<R, Error> {
+pub fn err<R>(str: &str) -> Result<R> {
     Err(Error::Generic(str.into()))
+}
+
+impl From<aes_gcm_siv::aead::Error> for Error {
+    fn from(err: aes_gcm_siv::aead::Error) -> Self {
+        Self::Generic(err.to_string())
+    }
 }
 
 pub fn fn_err(str: &str) -> impl Fn() -> Error + '_ {
@@ -60,12 +107,6 @@ pub fn _io_err(str: &str) -> std::io::Error {
 impl From<String> for Error {
     fn from(e: String) -> Error {
         Error::Generic(e)
-    }
-}
-
-impl From<&str> for Error {
-    fn from(e: &str) -> Error {
-        Error::Generic(e.to_owned())
     }
 }
 

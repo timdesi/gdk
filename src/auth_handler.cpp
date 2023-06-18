@@ -1,5 +1,5 @@
 #include "auth_handler.hpp"
-
+#include "autobahn_wrapper.hpp"
 #include "exception.hpp"
 #include "ga_strings.hpp"
 #include "ga_tx.hpp"
@@ -40,7 +40,7 @@ namespace sdk {
     }
 
     std::unique_ptr<auth_handler> auth_handler::remove_next_handler() { return std::move(m_next_handler); }
-    bool auth_handler::on_next_handler_complete(auth_handler* /*next_handler*/) { return false; }
+    void auth_handler::on_next_handler_complete(auth_handler* /*next_handler*/) {}
 
     auth_handler_impl::auth_handler_impl(session& session, const std::string& name, std::shared_ptr<signer> signer)
         : m_session_parent(session)
@@ -63,6 +63,8 @@ namespace sdk {
     auth_handler_impl::~auth_handler_impl() {}
 
     void auth_handler::signal_2fa_request(const std::string& /*action*/) { GDK_RUNTIME_ASSERT(false); }
+
+    void auth_handler::signal_data_request() { GDK_RUNTIME_ASSERT(false); }
 
     void auth_handler::set_error(const std::string& /*error_message*/) { GDK_RUNTIME_ASSERT(false); }
 
@@ -97,6 +99,9 @@ namespace sdk {
         case hw_request::get_blinding_nonces:
             action = "get_blinding_nonces";
             break;
+        case hw_request::get_blinding_factors:
+            action = "get_blinding_factors";
+            break;
         case hw_request::none:
         default:
             GDK_RUNTIME_ASSERT(false);
@@ -115,6 +120,13 @@ namespace sdk {
         }
         m_twofactor_data = nlohmann::json::object();
         m_state = !m_methods || m_methods->empty() ? state_type::make_call : state_type::request_code;
+    }
+
+    void auth_handler_impl::signal_data_request()
+    {
+        m_methods.reset(new std::vector<std::string>{ "data" });
+        signal_2fa_request("data");
+        m_auth_data = nlohmann::json::object();
     }
 
     void auth_handler_impl::set_error(const std::string& error_message)
@@ -141,8 +153,8 @@ namespace sdk {
 
     void auth_handler_impl::request_code_impl(const std::string& method)
     {
-        // For gauth request code is a no-op
-        if (method != "gauth") {
+        // For gauth or data, request code is a no-op
+        if (method != "gauth" && method != "data") {
             m_auth_data = m_session->auth_handler_request_code(method, m_action, m_twofactor_data);
         }
 
@@ -234,8 +246,12 @@ namespace sdk {
 
     auth_handler::state_type auth_handler_impl::get_state() const { return m_state; }
     auth_handler::hw_request auth_handler_impl::get_hw_request() const { return m_hw_request; }
+    bool auth_handler_impl::is_data_request() const
+    {
+        return m_methods && m_methods->size() == 1u && m_methods->front() == "data";
+    }
     const nlohmann::json& auth_handler_impl::get_twofactor_data() const { return m_twofactor_data; }
-    const std::string& auth_handler_impl::get_code() const { return m_code; };
+    const std::string& auth_handler_impl::get_code() const { return m_code; }
     const nlohmann::json& auth_handler_impl::get_hw_reply() const { return m_hw_reply; }
 
     session_impl& auth_handler_impl::get_session() const { return *m_session; }
@@ -363,13 +379,13 @@ namespace sdk {
     {
         return get_current_handler()->get_hw_request();
     }
-
+    bool auto_auth_handler::is_data_request() const { return get_current_handler()->is_data_request(); }
     const nlohmann::json& auto_auth_handler::get_twofactor_data() const
     {
         return get_current_handler()->get_twofactor_data();
     }
 
-    const std::string& auto_auth_handler::get_code() const { return get_current_handler()->get_code(); };
+    const std::string& auto_auth_handler::get_code() const { return get_current_handler()->get_code(); }
     const nlohmann::json& auto_auth_handler::get_hw_reply() const { return get_current_handler()->get_hw_reply(); }
     nlohmann::json&& auto_auth_handler::move_result() { return get_current_handler()->move_result(); }
 
@@ -404,7 +420,15 @@ namespace sdk {
             }
             // TODO: Intrusive handler processing
             // Allow the next-to-last handler to fetch results from its sub-handler
-            return get_current_handler()->on_next_handler_complete(last_handler.get());
+            get_current_handler()->on_next_handler_complete(last_handler.get());
+            return true; // Continue processing the current handler
+        }
+
+        if (state == state_type::request_code && handler->is_data_request()) {
+            // A request for more data from the caller. Handle it internally,
+            // the caller just sees resolve_code for "data" with the details.
+            handler->request_code("data");
+            return true; // Continue processing the current handler
         }
 
         // TODO: When multiple signers are supported, get the signer indicated by the
@@ -443,6 +467,8 @@ namespace sdk {
         const auto status = get_status();
         const auto& required_data = status.at("required_data");
         const bool have_master_blinding_key = signer->has_master_blinding_key();
+        // The internal software wallet must have a master blinding key
+        GDK_RUNTIME_ASSERT(!signer->is_liquid() || have_master_blinding_key || is_hardware);
         nlohmann::json result;
 
         if (request == hw_request::get_master_blinding_key) {
@@ -478,6 +504,10 @@ namespace sdk {
             }
             handler->resolve_hw_reply(std::move(result));
             return true;
+        } else if (have_master_blinding_key && request == hw_request::get_blinding_factors) {
+            // Host unblinding: Blind a transaction
+            handler->resolve_hw_reply(get_blinding_factors(signer->get_master_blinding_key(), required_data));
+            return true;
         } else if (request == hw_request::get_xpubs) {
             const auto& paths = required_data.at("paths");
             if (!is_hardware || are_all_paths_cached(signer, paths)) {
@@ -498,7 +528,11 @@ namespace sdk {
             const std::vector<uint32_t> path = required_data.at("path");
             const std::string message = required_data.at("message");
             const auto message_hash = format_bitcoin_message_hash(ustring_span(message));
-            result["signature"] = sig_to_der_hex(signer->sign_hash(path, message_hash));
+            if (required_data.value("recoverable", false)) {
+                result["signature"] = b2h(signer->sign_rec_hash(path, message_hash));
+            } else {
+                result["signature"] = sig_only_to_der_hex(signer->sign_hash(path, message_hash));
+            }
         } else if (request == hw_request::get_master_blinding_key) {
             result["master_blinding_key"] = b2h(signer->get_master_blinding_key());
         } else if (request == hw_request::sign_tx) {

@@ -2,11 +2,13 @@
 #define GDK_WAMP_TRANSPORT_HPP
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "autobahn_wrapper.hpp"
 #include "logging.hpp"
+#include "threading.hpp"
 
 namespace ga {
 namespace sdk {
@@ -22,10 +24,10 @@ namespace sdk {
         return result.template argument<T>(0);
     }
 
-    template <typename T = std::string> boost::optional<T> wamp_cast_nil(const autobahn::wamp_call_result& result)
+    template <typename T = std::string> std::optional<T> wamp_cast_nil(const autobahn::wamp_call_result& result)
     {
         if (result.template argument<msgpack::object>(0).is_nil()) {
-            return boost::none;
+            return {};
         }
         return result.template argument<T>(0);
     }

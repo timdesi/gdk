@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::*;
 
-use electrum_client::{Client, ConfigBuilder};
+use electrum_client::{Client, ConfigBuilder, Socks5Config};
+use gdk_common::electrum_client;
+use gdk_common::network::NETWORK_REQUEST_TIMEOUT;
+use std::net::ToSocketAddrs;
 use std::str::FromStr;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -12,15 +15,22 @@ pub enum ElectrumUrl {
 }
 
 impl ElectrumUrl {
-    /// returns error if both proxy and timeout are set
     pub fn build_client(&self, proxy: Option<&str>, timeout: Option<u8>) -> Result<Client, Error> {
         let mut config = ConfigBuilder::new();
 
         // TODO: add support for socks5 credentials?
-        config = config.socks5(
-            proxy.filter(|p| !p.trim().is_empty()).map(|p| electrum_client::Socks5Config::new(p)),
-        )?;
-        config = config.timeout(timeout)?;
+        if let Some(proxy) = proxy {
+            if !proxy.trim().is_empty() {
+                if proxy.replacen("socks5://", "", 1).to_socket_addrs().is_err() {
+                    return Err(Error::InvalidProxySocket(proxy.to_string()));
+                }
+                config = config.socks5(Some(Socks5Config::new(proxy)));
+            }
+        }
+
+        let timeout = timeout.unwrap_or(NETWORK_REQUEST_TIMEOUT.as_secs() as u8);
+
+        config = config.timeout(Some(timeout));
 
         let (url, config) = match self {
             ElectrumUrl::Tls(url, validate) => {
@@ -69,18 +79,20 @@ impl FromStr for ElectrumUrl {
 
 #[cfg(test)]
 mod test {
-    use bitcoin::consensus::deserialize;
-    use bitcoin::hashes::hex::{FromHex, ToHex};
-    use bitcoin::hashes::Hash;
-    use bitcoin::secp256k1::{Message, SecretKey};
-    use bitcoin::util::bip143::SigHashCache;
-    use bitcoin::util::bip32::{ExtendedPrivKey, ExtendedPubKey};
-    use bitcoin::util::key::PrivateKey;
-    use bitcoin::util::key::PublicKey;
-    use bitcoin::Script;
-    use bitcoin::{Address, Network, SigHashType, Transaction};
+    use gdk_common::bitcoin::consensus::deserialize;
+    use gdk_common::bitcoin::hashes::hex::{FromHex, ToHex};
+    use gdk_common::bitcoin::hashes::Hash;
+    use gdk_common::bitcoin::secp256k1::{Message, SecretKey};
+    use gdk_common::bitcoin::util::bip32::{ExtendedPrivKey, ExtendedPubKey};
+    use gdk_common::bitcoin::util::key::PrivateKey;
+    use gdk_common::bitcoin::util::key::PublicKey;
+    use gdk_common::bitcoin::util::sighash::SighashCache;
+    use gdk_common::bitcoin::{Address, Network, Transaction};
+    use gdk_common::bitcoin::{EcdsaSighashType, Script};
     use gdk_common::scripts::p2shwpkh_script_sig;
     use std::str::FromStr;
+
+    use super::*;
 
     fn p2pkh_hex(pk: &str) -> (PublicKey, Script) {
         let pk = Vec::<u8>::from_hex(pk).unwrap();
@@ -99,11 +111,11 @@ mod test {
             Vec::<u8>::from_hex("eb696a065ef48a2192da5b28b694f87544b30fae8327c4510137a922f32c6dcf")
                 .unwrap();
 
-        let key = SecretKey::from_slice(&private_key_bytes).unwrap();
+        let inner = SecretKey::from_slice(&private_key_bytes).unwrap();
         let private_key = PrivateKey {
             compressed: true,
             network: Network::Testnet,
-            key,
+            inner,
         };
 
         let (public_key, witness_script) =
@@ -113,15 +125,17 @@ mod test {
             "76a91479091972186c449eb1ded22b78e40d009bdf008988ac"
         );
         let value = 1_000_000_000;
-        let hash =
-            SigHashCache::new(&tx).signature_hash(0, &witness_script, value, SigHashType::All);
+        let hash = SighashCache::new(&tx)
+            .segwit_signature_hash(0, &witness_script, value, EcdsaSighashType::All)
+            .unwrap();
 
         assert_eq!(
             &hash.into_inner().to_hex(),
             "64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6"
         );
 
-        let signature = crate::EC.sign(&Message::from_slice(&hash[..]).unwrap(), &private_key.key);
+        let signature =
+            crate::EC.sign_ecdsa(&Message::from_slice(&hash[..]).unwrap(), &private_key.inner);
 
         //let mut signature = signature.serialize_der().to_vec();
         let signature_hex = format!("{:?}01", signature); // add sighash type at the end
@@ -138,9 +152,9 @@ mod test {
     #[test]
     fn test_my_tx() {
         let xprv = ExtendedPrivKey::from_str("tprv8jdzkeuCYeH5hi8k2JuZXJWV8sPNK62ashYyUVD9Euv5CPVr2xUbRFEM4yJBB1yBHZuRKWLeWuzH4ptmvSgjLj81AvPc9JhV4i8wEfZYfPb").unwrap();
-        let xpub = ExtendedPubKey::from_private(&crate::EC, &xprv);
-        let private_key = xprv.private_key;
-        let public_key = xpub.public_key;
+        let xpub = ExtendedPubKey::from_priv(&crate::EC, &xprv);
+        let private_key = xprv.to_priv();
+        let public_key = xpub.to_pub();
         let public_key_bytes = public_key.to_bytes();
         let public_key_str = public_key_bytes.to_hex();
 
@@ -162,25 +176,57 @@ mod test {
             "76a9141790ee5e7710a06ce4a9250c8677c1ec2843844f88ac"
         );
         let value = 10_202;
-        let hash =
-            SigHashCache::new(&tx).signature_hash(0, &witness_script, value, SigHashType::All);
+        let hash = SighashCache::new(&tx)
+            .segwit_signature_hash(0, &witness_script, value, EcdsaSighashType::All)
+            .unwrap();
 
         assert_eq!(
             hash.into_inner().to_hex(),
             "58b15613fc1701b2562430f861cdc5803531d08908df531082cf1828cd0b8995",
         );
 
-        let signature = crate::EC.sign(&Message::from_slice(&hash[..]).unwrap(), &private_key.key);
+        let signature =
+            crate::EC.sign_ecdsa(&Message::from_slice(&hash[..]).unwrap(), &private_key.inner);
 
         //let mut signature = signature.serialize_der().to_vec();
         let signature_hex = format!("{:?}01", signature); // add sighash type at the end
         let signature = Vec::<u8>::from_hex(&signature_hex).unwrap();
 
         assert_eq!(signature_hex, "304402206675ed5fb86d7665eb1f7950e69828d0aa9b41d866541cedcedf8348563ba69f022077aeabac4bd059148ff41a36d5740d83163f908eb629784841e52e9c79a3dbdb01");
-        assert_eq!(tx.input[0].witness[0], signature);
-        assert_eq!(tx.input[0].witness[1], public_key_bytes);
+        let witness = tx.input[0].witness.to_vec();
+        assert_eq!(witness[0], signature);
+        assert_eq!(witness[1], public_key_bytes);
 
         let script_sig = p2shwpkh_script_sig(&public_key);
         assert_eq!(tx.input[0].script_sig, script_sig);
+    }
+
+    /// Tests that passing an invalid proxy to `ElectrumUrl::build_client()`
+    /// immediately results in an error.
+    #[test]
+    fn invalid_proxy() {
+        let url = ElectrumUrl::Plaintext(String::new());
+        let invalid_proxy = "invalid_proxy";
+
+        assert!(matches!(
+            url.build_client(Some(&invalid_proxy), None),
+            Err(Error::InvalidProxySocket(p)) if p == invalid_proxy
+        ));
+    }
+
+    #[test]
+    fn valid_proxy() {
+        let url = ElectrumUrl::Plaintext(String::new());
+
+        // `build_client()` can still return an error, here we're just checking
+        // that the error it returns (if any) is not caused by an incorrectly
+        // formatted proxy.
+
+        for valid_proxy in ["127.0.0.1:9050", "socks5://127.0.0.1:9050", "localhost:9050"] {
+            assert!(!matches!(
+                url.build_client(Some(valid_proxy), None),
+                Err(Error::InvalidProxySocket(_))
+            ));
+        }
     }
 }

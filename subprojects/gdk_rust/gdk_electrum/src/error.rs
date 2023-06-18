@@ -1,12 +1,11 @@
-use crate::store::StoreMeta;
-use crate::{Account, BEOutPoint, BETxid, State};
-use aes_gcm_siv::aead;
-use bitcoin::util::bip32::ExtendedPubKey;
-use elements::hash_types::Txid;
+use crate::BETxid;
+use gdk_common::bitcoin::util::bip32::ExtendedPubKey;
+use gdk_common::bitcoin::util::sighash;
 use gdk_common::error::Error as CommonError;
+use gdk_common::{bitcoin, electrum_client, elements, ureq};
 use serde::ser::Serialize;
-use std::collections::{HashMap, HashSet};
 use std::convert::From;
+use std::path::PathBuf;
 use std::sync::{MutexGuard, PoisonError, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(thiserror::Error, Debug)]
@@ -20,8 +19,19 @@ pub enum Error {
     #[error("`asset_id` cannot be empty in Liquid")]
     AssetEmpty,
 
+    #[error("Expected a {expected}")]
+    AvailableIndexesBadResponse {
+        expected: String,
+    },
+
+    #[error(transparent)]
+    Base64DecodeError(#[from] base64::DecodeError),
+
     #[error(transparent)]
     Bitcoin(#[from] bitcoin::util::Error),
+
+    #[error(transparent)]
+    BitcoinAddressError(#[from] bitcoin::util::address::Error),
 
     #[error(transparent)]
     BitcoinBIP32Error(#[from] bitcoin::util::bip32::Error),
@@ -43,6 +53,9 @@ pub enum Error {
 
     #[error(transparent)]
     Common(#[from] CommonError),
+
+    #[error(transparent)]
+    ElementsAddressError(#[from] elements::address::AddressError),
 
     #[error(transparent)]
     ElementsEncode(#[from] elements::encode::Error),
@@ -86,14 +99,14 @@ pub enum Error {
     #[error("invalid mnemonic")]
     InvalidMnemonic,
 
-    /// An invalid pin attempt. Should trigger an increment to the caller
-    /// counter as after 3 consecutive wrong guesses the server will delete the
-    /// corresponding key. Other errors should leave such counter unchanged.
-    #[error("id_invalid_pin")]
-    InvalidPin,
-
     #[error("invalid replacement request fields")]
     InvalidReplacementRequest,
+
+    #[error("invalid sighash")]
+    InvalidSigHash,
+
+    #[error("Sync interrupted because user don't want to sync")]
+    UserDontWantToSync,
 
     #[error(transparent)]
     InvalidStringUtf8(#[from] std::string::FromUtf8Error),
@@ -103,6 +116,9 @@ pub enum Error {
 
     #[error("invalid subaccount {0}")]
     InvalidSubaccount(u32),
+
+    #[error(transparent)]
+    MiniscriptError(#[from] gdk_common::miniscript::Error),
 
     #[error("Xpubs mismatch ({0} vs {1})")]
     MismatchingXpubs(ExtendedPubKey, ExtendedPubKey),
@@ -116,11 +132,15 @@ pub enum Error {
     #[error("non confidential address")]
     NonConfidentialAddress,
 
-    #[error("id_connection_failed")]
-    PinError,
+    #[error("Invalid proxy socket: {0}")]
+    InvalidProxySocket(String),
 
-    #[error("PSET and Tx mismatch ({0} vs {1})")]
-    PsetAndTxMismatch(Txid, Txid),
+    #[error("{}", match .0 {
+        gdk_pin_client::Error::InvalidPin
+        | gdk_pin_client::Error::Decryption(_) => "id_invalid_pin",
+        _ => "id_connection_failed",
+    })]
+    PinClient(#[from] gdk_pin_client::Error),
 
     #[error(transparent)]
     PsetBlindError(#[from] elements::pset::PsetBlindError),
@@ -164,11 +184,29 @@ pub enum Error {
     #[error("unknown call")]
     UnknownCall,
 
+    #[error("unsupported sighash")]
+    UnsupportedSigHash,
+
     #[error(transparent)]
     UreqError(#[from] ureq::Error),
 
+    #[error(transparent)]
+    Sighash(#[from] sighash::Error),
+
     #[error("wallet is not initialized")]
     WalletNotInitialized,
+
+    #[error(
+        "{}method not found: {method:?}",
+        if *.in_session { "session " } else {""}
+    )]
+    MethodNotFound {
+        method: String,
+        in_session: bool,
+    },
+
+    #[error("{0} do not exist")]
+    FileNotExist(PathBuf),
 
     #[error("{0}")]
     Generic(String),
@@ -199,63 +237,51 @@ impl From<String> for Error {
     }
 }
 
-// `aead::Error` doesn't implement `std::error::Error`.
-impl From<aead::Error> for Error {
-    fn from(err: aead::Error) -> Self {
-        Error::Generic(err.to_string())
-    }
-}
-
-impl From<PoisonError<RwLockReadGuard<'_, StoreMeta>>> for Error {
-    fn from(err: PoisonError<RwLockReadGuard<'_, StoreMeta>>) -> Self {
+impl<T> From<PoisonError<RwLockReadGuard<'_, T>>> for Error {
+    fn from(err: PoisonError<RwLockReadGuard<'_, T>>) -> Self {
         Error::RwLockPoisonError(err.to_string())
     }
 }
 
-impl From<PoisonError<RwLockWriteGuard<'_, StoreMeta>>> for Error {
-    fn from(err: PoisonError<RwLockWriteGuard<'_, StoreMeta>>) -> Self {
+impl<T> From<PoisonError<RwLockWriteGuard<'_, T>>> for Error {
+    fn from(err: PoisonError<RwLockWriteGuard<'_, T>>) -> Self {
         Error::RwLockPoisonError(err.to_string())
     }
 }
 
-impl From<PoisonError<RwLockReadGuard<'_, State>>> for Error {
-    fn from(err: PoisonError<RwLockReadGuard<'_, State>>) -> Self {
-        Error::RwLockPoisonError(err.to_string())
-    }
-}
-
-impl From<PoisonError<RwLockWriteGuard<'_, State>>> for Error {
-    fn from(err: PoisonError<RwLockWriteGuard<'_, State>>) -> Self {
-        Error::RwLockPoisonError(err.to_string())
-    }
-}
-
-impl From<PoisonError<RwLockReadGuard<'_, HashMap<u32, Account>>>> for Error {
-    fn from(err: PoisonError<RwLockReadGuard<'_, HashMap<u32, Account>>>) -> Self {
-        Error::RwLockPoisonError(err.to_string())
-    }
-}
-
-impl From<PoisonError<RwLockWriteGuard<'_, HashMap<u32, Account>>>> for Error {
-    fn from(err: PoisonError<RwLockWriteGuard<'_, HashMap<u32, Account>>>) -> Self {
-        Error::RwLockPoisonError(err.to_string())
-    }
-}
-
-impl From<PoisonError<RwLockReadGuard<'_, HashSet<BEOutPoint>>>> for Error {
-    fn from(err: PoisonError<RwLockReadGuard<'_, HashSet<BEOutPoint>>>) -> Self {
-        Error::RwLockPoisonError(err.to_string())
-    }
-}
-
-impl From<PoisonError<RwLockWriteGuard<'_, HashSet<BEOutPoint>>>> for Error {
-    fn from(err: PoisonError<RwLockWriteGuard<'_, HashSet<BEOutPoint>>>) -> Self {
-        Error::RwLockPoisonError(err.to_string())
-    }
-}
-
-impl From<PoisonError<MutexGuard<'_, ()>>> for Error {
-    fn from(err: PoisonError<MutexGuard<'_, ()>>) -> Self {
+impl<T> From<PoisonError<MutexGuard<'_, T>>> for Error {
+    fn from(err: PoisonError<MutexGuard<'_, T>>) -> Self {
         Error::MutexPoisonError(err.to_string())
+    }
+}
+
+impl Error {
+    /// Convert the error to a GDK-compatible code.
+    pub fn to_gdk_code(&self) -> String {
+        // Unhandled error codes:
+        // id_no_amount_specified
+        // id_invalid_replacement_fee_rate
+        // id_send_all_requires_a_single_output
+
+        use super::Error::*;
+        match *self {
+            InsufficientFunds => "id_insufficient_funds",
+            InvalidAddress => "id_invalid_address",
+            NonConfidentialAddress => "id_nonconfidential_addresses_not",
+            InvalidAmount => "id_invalid_amount",
+            InvalidAssetId => "id_invalid_asset_id",
+            FeeRateBelowMinimum(_) => "id_fee_rate_is_below_minimum",
+            // An invalid pin attempt. Should trigger an increment to the
+            // caller counter as after 3 consecutive wrong guesses the server
+            // will delete the corresponding key. Other errors should leave
+            // such counter unchanged.
+            PinClient(gdk_pin_client::Error::InvalidPin | gdk_pin_client::Error::Decryption(_)) => {
+                "id_invalid_pin"
+            }
+            PinClient(_) => "id_connection_failed",
+            EmptyAddressees => "id_no_recipients",
+            _ => "id_unknown",
+        }
+        .to_string()
     }
 }

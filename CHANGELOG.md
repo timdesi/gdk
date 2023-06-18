@@ -1,12 +1,228 @@
 # Changelog
 
-## Release 0.0.56
+## Release 0.0.65
 
 ### Added
 
 ### Changed
 
 ### Fixed
+
+### Removed
+
+## Release 0.0.64 - 23-06-05
+
+### Added
+- GA_get_unspent_outputs: Singlesig: Liquid: set `is_confidential`.
+
+### Changed
+- Singlesig: switch from polling to subscription for transactions data. This
+  change is transparent for the caller, but it should improve performances and
+  reduce the server load.
+
+
+## Release 0.0.63 - 23-05-31
+
+### Added
+- Liquid: Transaction blinding is now performed using a new call
+  GA_blind_transaction, which should be called after creating and before
+  signing the tx.
+- Liquid: Hardware wallet capability JSON now contains a new field
+  "supports_external_blinding". This should be set to true when registering
+  a signer that can blind/sign transactions with blinded outputs from
+  wallets other than the callers wallet (for example, a 2 step swap).
+
+### Changed
+- FFI (validate_call): Input JSON parameters are now moved internally and will be
+  empty when an API call returns. This only affects C and C++ callers.
+- GA_validate: When validating addressees, the entered amount is also validated
+  and converted into satoshis. Additionally, the scriptpubkey and blinding public
+  key are extracted from the address and returned where applicable.
+- GA_sign_transaction/GA_send_transaction: The "script" element of the returned
+  "transaction_outputs" elements has been renamed to "scriptpubkey" to reflect
+  its contents more accurately.
+- Liquid/JSON: The keys `blinded` and `confidential` in returned JSON have been
+  renamed for consistency and to avoid confusion. `is_blinded` now always refers
+  to a transaction input or output which has been blinded, i.e. its value and
+  asset have been replaced with blinded commitments. `is_blinded` at the
+  top-level of transaction JSON indicates that the transaction has been fully
+  blinded and is ready for signing. `is_confidential` now always refers to
+  an address or addressee element having a confidential address.
+- Liquid: update hard-coded asset icons.
+
+### Fixed
+
+### Removed
+
+## Release 0.0.62 - 2023-04-23
+
+### Added
+
+### Changed
+
+### Fixed
+- Watch Only: Fix old-style watch-only sessions fetching UTXOs and balances.
+
+### Removed
+- GA_create_transaction (and sign/send): The `has_change` element has been removed.
+- GA_create_transaction (and blind/sign/send): The `transaction_size` element
+  has been removed. It can instead be computed from the `transaction` element.
+- GA_sign_transaction (and blind/send): The `utxos` element is now removed when the
+  handler returns, as it is only used for transaction creation.
+- GA_create_transaction(Liquid/AMP): For transactions involving AMP subaccounts,
+  the required blinding nonces for outputs are no longer available in the
+  individual "transaction_outputs" elements. Instead they should be fetched from
+  "blinding_nonces" in the top-level transaction details if required.
+
+## Release 0.0.61 - 2023-04-18
+
+### Fixed
+- Allow GA_decrypt_with_pin to decrypt pin_data created with GA_set_pin.
+
+## Release 0.0.60 - 2023-04-18
+
+### Fixed
+- Fix artifacts for OSX builds.
+
+## Release 0.0.59 - 2023-04-12
+
+### Added
+
+- GA_login_user: add support for Electrum watch only. It is now possible to
+  login with a list of xpubs or descriptors.
+- GA_psbt_sign: add support for Liquid Electrum sessions.
+
+### Changed
+- GA_get_twofactor_config: Fiat pricing limits no longer return corresponding
+  converted BTC amounts. When "is_fiat" is `true`, the caller should convert
+  the amount themselves using GA_convert_amount if desired.
+- FFI (All calls): Input JSON parameters are now moved internally and will be
+  empty when an API call returns. This only affects C and C++ callers.
+- Singlesig: GA_create_transaction now has aligned behavior with multisig:
+  previous workarounds to handle the differences between the session types
+  can be removed.
+- Liquid: Singlesig: Allow 32 bytes master blinding keys, consistently with
+  multisig.
+- Build: Replace meson with cmake and make sqlite3 an external dependencies,
+  check the updated README for the new build instructions.
+
+### Fixed
+- GA_sign_transaction/GA_send_transaction: Fixed exception thrown when a fiat
+  spending limit is set but cannot be used (for example, because the pricing
+  source is unavailable). When this occurs, 2FA will be required.
+- GA_get_twofactor_config: Fixed exception thrown when a fiat pricing source
+  is unavailable and a fiat spending limit is set.
+- Singlesig: Fix handling of some invalid proxies.
+- Fix a bug in Android build.
+- Fix missing URL overrides in network parameters.
+
+### Removed
+- Removed Python wheel for Ubuntu 18.04, replaced with wheel for Ubuntu 20.04
+
+## Release 0.0.58 - 2023-02-06
+
+### Added
+- GA_validate: Add support for validating transaction addressees.
+- GA_get_unspent_outputs: add a `sort_by` element to return sorted results.
+- Added new function GA_sign_message
+
+### Changed
+- GA_create_transaction: Sweeping and re-deposit transactions now require the
+  caller to provide the recipient address. GA_get_receive_address can be used
+  for this purpose.
+- GA_create_transaction: If addressees are not provided, some fields of the
+  result transaction may not be populated.
+- GA_create_transaction: The `addressees_have_assets` element has been removed.
+- GA_get_unspent_outputs: The default sorting for multisig non-2of2
+  subaccounts has been changed from oldest-first to largest-first.
+- Singlesig: GA_change_settings, GA_get_available_currencies and
+  GA_convert_amount have now aligned behavior with multisig: all the prices
+  and venues are matched and changing settings actually influence the fiat
+  currency returned from GA_convert_amount.
+- GA_encrypt_with_pin: Add `hmac` field.
+- Liquid: update hard-coded asset icons.
+
+### Fixed
+- Liquid: Fix the min fee and dust threshold for multi/singlesig respectively.
+- Liquid: Respect the dust limit for non-fee L-BTC outputs.
+- GA_create_transaction: `id_no_amount_specified` is now returned under all
+  circumstances where an amount is not given in an addressee.
+- GA_create_transaction: Non-partial transactions where `utxo_strategy` is set
+  to `"manual"` now return an error if an asset is provided in `used_utxos`
+  that does not correspond to an addressee.
+- Singlesig: GA_get_transactions: fix script serialization
+- Singlesig: fixes for block and transaction notifications
+
+### Removed
+
+## Release 0.0.57 - 2022-11-23
+
+### Added
+- GA_get_subaccount: add user_path, core_descriptor, slip132_extended_pubkey.
+- GA_get_assets: add ability to fetch information about Liquid assets by
+specifying one or more of the following fields: `names`, `tickers`, `category`.
+
+### Changed
+
+- Singlesig: GA_convert_amount: If a fallback fiat rate is provided the
+  function will return that rate immediately instead of waiting for the latest
+  rate to be fetched.
+- GA_refresh_assets: remove "refresh" parameter. Now every call to
+GA_refresh_assets will perform a network call to update the Liquid assets. To
+avoid the network call use GA_get_assets. In addition GA_refresh_assets now
+does not return any value, to get assets data use GA_get_assets.
+- GA_get_assets: it is now possible to fetch information's via the `assets_id`
+even before logging into a session.
+- Removed support for LiquiDEX v0 for GA_create_swap_transaction,
+GA_complete_swap_transaction and GA_validate, which now support LiquiDEX v1
+only. LiquiDEX v0 transactions can still be created and completed with
+GA_create_transaction.
+
+### Fixed
+
+### Removed
+
+## Release 0.0.56 - 2022-10-03
+
+### Added
+
+- Added new function GA_decrypt_with_pin
+- Added new function GA_validate
+- Added new functions GA_create_swap_transaction and
+  GA_complete_swap_transaction with support for LiquiDEX v0
+
+### Changed
+
+- GA_get_transactions: The input/output "addressee" element is now only populated for now-disabled historical social payments.
+- GA_get_transactions: The top-level "satoshi" elements are now signed; negative values represent outgoing amounts.
+- Singlesig: Stop stripping the witness from transactions, transaction hex returned from `get_transaction_details` will
+return also the witness. Triggers a cache rebuild that could be noticeable from apps, seeing no transactions for a moment.
+- GA_convert_amount: This can now be used to convert negative values.
+- GA_get_wallet_identifier (and register/login): Now returns a network-agnostic version of "wallet_hash_id" as "xpub_hash_id".
+- GA_create_transaction (and sign/send): The top-level "subaccount" type is no longer required or populated, and
+"subaccount_type" is also no longer populated. The subaccount(s) the tx refers to are now inferred automatically
+from its input UTXOs and output addressees.
+- Singlesig: Exchange rates for the BTC-USD currency pair are now fetched from a
+  Blockstream service.
+
+### Fixed
+
+- If the network connection drops in the middle of a request the latter will be
+  eventually timed out instead of waiting for the connection to be available
+  again.
+- Fixed an issue where the Liquid asset registry would be re-downloaded
+  every time `GA_refresh_assets` was called if the local registry file got corrupted.
+- Fixed an issue where `GA_get_assets` would not return any assets if a
+  wallet's Liquid cache file got corrupted.
+- Singlesig: GA_get_transactions: Correctly handle "mixed" transactions
+- Singlesig: Fixed a race condition, now after a block notification, all
+  transactions are considering the last height.
+
+### Removed
+
+- JSON: remove "server_signed" from create/sign/send transaction JSON.
+- JSON: remove "user_signed" from create/sign/send transaction JSON.
+- GA_get_transactions: Remove the top-level "addressees" element. Callers should use the "address" elements of inputs and outputs instead.
 
 ## Release 0.0.55 - 2022-07-08
 
@@ -74,7 +290,7 @@
 - Update openssl to 1.1.1n
 - Update libwally to latest
 - Rust is now mandatory for building
-- Registry: Switched to unified implementation with full asset data. Only Liquid-BTC icon is hardcoded, only asset metadata having icons are hardcoded (38 assets)
+- Registry: Switched to unified implementation with full asset data. Only Liquid-BTC icon is hard-coded, only asset metadata having icons are hard-coded (38 assets)
 
 ### Fixed
 
@@ -104,7 +320,7 @@
 ## Release 0.0.51 - 2022-03-30
 
 - SPV: Enable SPV for multisig BTC wallets
-- Singlesig: support for hw signers (Bitcoin only)
+- Singlesig: support for HWW signers (Bitcoin only)
 - Singlesig: support for GA_http_request
 - Singlesig: implement GA_remove_account, see docs for details.
 
@@ -124,7 +340,7 @@
 - Singlesig: Improved account discovery
 - Multisig: Don't send connection notifications for user-initiated session disconnect/destroy
 - Multisig: Remove old support for passing addressee asset_id as asset_tag
-- Multisig: Standardise address subtype as always 0 instead of null
+- Multisig: Standardize address subtype as always 0 instead of null
 - Multisig: Remove range and surjection proofs from returned UTXO data
 - Multisig: Fix spending from very old version 0 addresses
 - Liquid: Return blinded addresses in tx list results
@@ -140,7 +356,7 @@
 - Liquid: Disable multi-asset sends on all networks
 - Liquid: Fix AMP blinding key upload on new subaccount creation
 - Single sig: Randomize secp context before use
-- All: Update localisation strings
+- All: Update localization strings
 - Misc bug fixes
 
 
@@ -161,7 +377,7 @@
 ## Release 0.0.46.post1 - 2021-10-26
 
 - Fix: increase proxy and socks setup timeouts
-- Fix: tor wakeup
+- Fix: tor wake-up
 
 
 ## Release 0.0.46 - 2021-10-19
@@ -171,7 +387,7 @@
 - Single sig: Add support for manual coin selection
 - Single sig: Improve TLS handling to allow connecting to more electrum servers
 - Improve expired certificate handling
-- Allow fetching wallet id without login and return it from register. Note the identifier returned by single sig sessions has changed to match multisig behaviour
+- Allow fetching wallet id without login and return it from register. Note the identifier returned by single sig sessions has changed to match multisig behavior
 - Fix builds under Python 3.9
 
 

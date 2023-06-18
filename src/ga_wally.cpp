@@ -1,7 +1,8 @@
-#include "ga_wally.hpp"
-#include "boost_wrapper.hpp"
+#include <boost/algorithm/string/predicate.hpp>
+
 #include "exception.hpp"
 #include "ga_strings.hpp"
+#include "ga_wally.hpp"
 #include "memory.hpp"
 #include "utils.hpp"
 
@@ -195,30 +196,18 @@ namespace sdk {
         out.resize(written);
     }
 
-    void scriptpubkey_csv_2of3_then_2_from_bytes(byte_span_t keys, uint32_t csv_blocks, std::vector<unsigned char>& out)
-    {
-        GDK_RUNTIME_ASSERT(!out.empty());
-        const uint32_t flags = 0;
-        size_t written;
-        GDK_VERIFY(wally_scriptpubkey_csv_2of3_then_2_from_bytes(
-            keys.data(), keys.size(), csv_blocks, flags, &out[0], out.size(), &written));
-        GDK_RUNTIME_ASSERT(written <= out.size());
-        out.resize(written);
-    }
-
     uint32_t get_csv_blocks_from_csv_redeem_script(byte_span_t redeem_script)
     {
         size_t csv_blocks_offset;
 
-        if (redeem_script.at(0) == OP_DEPTH && redeem_script.at(1) == OP_1SUB && redeem_script.at(2) == OP_IF) {
+        if (redeem_script[0] == OP_DEPTH && redeem_script[1] == OP_1SUB && redeem_script[2] == OP_IF) {
             // 2of2 redeem script, with csv_blocks at:
             // OP_DEPTH OP_1SUB OP_IF <main_pubkey> OP_CHECKSIGVERIFY OP_ELSE <csv_blocks>
             csv_blocks_offset = 1 + 1 + 1 + (EC_PUBLIC_KEY_LEN + 1) + 1 + 1;
-        } else if (redeem_script.at(0) == EC_PUBLIC_KEY_LEN
-            && redeem_script.at(EC_PUBLIC_KEY_LEN + 1) == OP_CHECKSIGVERIFY
-            && redeem_script.at(EC_PUBLIC_KEY_LEN + 2) == EC_PUBLIC_KEY_LEN
-            && redeem_script.at(EC_PUBLIC_KEY_LEN * 2 + 3) == OP_CHECKSIG
-            && redeem_script.at(EC_PUBLIC_KEY_LEN * 2 + 4) == OP_IFDUP) {
+        } else if (redeem_script[0] == EC_PUBLIC_KEY_LEN && redeem_script[EC_PUBLIC_KEY_LEN + 1] == OP_CHECKSIGVERIFY
+            && redeem_script[EC_PUBLIC_KEY_LEN + 2] == EC_PUBLIC_KEY_LEN
+            && redeem_script[EC_PUBLIC_KEY_LEN * 2 + 3] == OP_CHECKSIG
+            && redeem_script[EC_PUBLIC_KEY_LEN * 2 + 4] == OP_IFDUP) {
             // 2of2 optimized redeem script, with csv_blocks at:
             // <recovery_pubkey> OP_CHECKSIGVERIFY <main_pubkey> OP_CHECKSIG OP_IFDUP OP_NOTIF <csv_blocks>
             csv_blocks_offset = (EC_PUBLIC_KEY_LEN + 1) + 1 + (EC_PUBLIC_KEY_LEN + 1) + 1 + 1 + 1;
@@ -227,53 +216,60 @@ namespace sdk {
             __builtin_unreachable();
         }
         // TODO: Move script integer parsing to wally and generalize
-        size_t len = redeem_script.at(csv_blocks_offset);
+        size_t len = redeem_script[csv_blocks_offset];
         GDK_RUNTIME_ASSERT(len <= 4);
         // Negative CSV blocks are not allowed
-        GDK_RUNTIME_ASSERT((redeem_script.at(csv_blocks_offset + len) & 0x80) == 0);
+        GDK_RUNTIME_ASSERT((redeem_script[csv_blocks_offset + len] & 0x80) == 0);
 
         uint32_t csv_blocks = 0;
         for (size_t i = 0; i < len; ++i) {
-            uint32_t b = redeem_script.at(csv_blocks_offset + 1 + i);
+            uint32_t b = redeem_script[csv_blocks_offset + 1 + i];
             csv_blocks |= (b << (8 * i));
         }
         return csv_blocks;
     }
 
-    ecdsa_sig_t get_sig_from_p2pkh_script_sig(byte_span_t script_sig)
+    sig_and_sighash_t get_sig_from_p2pkh_script_sig(byte_span_t script_sig)
     {
         // <user_sig> <pubkey>
         constexpr bool has_sighash = true;
-        size_t push_len = script_sig.at(0);
+        const size_t push_len = script_sig[0];
         GDK_RUNTIME_ASSERT(push_len && push_len <= EC_SIGNATURE_DER_MAX_LEN + 1);
         GDK_RUNTIME_ASSERT(static_cast<size_t>(script_sig.size()) >= push_len + 2);
-        return ec_sig_from_der(script_sig.subspan(1, push_len), has_sighash);
+        const auto der_sig = script_sig.subspan(1, push_len);
+        return { ec_sig_from_der(der_sig, has_sighash), der_sig.back() };
     }
 
-    std::vector<ecdsa_sig_t> get_sigs_from_multisig_script_sig(byte_span_t script_sig)
+    std::vector<sig_and_sighash_t> get_sigs_from_multisig_script_sig(byte_span_t script_sig)
     {
         constexpr bool has_sighash = true;
         size_t offset = 0;
         size_t push_len = 0;
         // OP_0 <ga_sig> <user_sig> <redeem_script>
 
-        GDK_RUNTIME_ASSERT(script_sig.at(offset) == OP_0);
+        GDK_RUNTIME_ASSERT(script_sig[offset] == OP_0);
         ++offset;
 
-        push_len = script_sig.at(offset);
+        push_len = script_sig[offset];
         GDK_RUNTIME_ASSERT(push_len <= EC_SIGNATURE_DER_MAX_LEN + 1);
         ++offset;
         GDK_RUNTIME_ASSERT(static_cast<size_t>(script_sig.size()) >= offset + push_len);
-        const ecdsa_sig_t ga_sig = ec_sig_from_der(script_sig.subspan(offset, push_len), has_sighash);
+        const auto ga_der_sig = script_sig.subspan(offset, push_len);
+        const uint32_t ga_sighash = ga_der_sig[push_len - 1];
+        const ecdsa_sig_t ga_sig = ec_sig_from_der(ga_der_sig, has_sighash);
+        auto ga_pair = std::make_pair(std::move(ga_sig), ga_sighash);
         offset += push_len;
 
-        push_len = script_sig.at(offset);
+        push_len = script_sig[offset];
         GDK_RUNTIME_ASSERT(push_len <= EC_SIGNATURE_DER_MAX_LEN + 1);
         ++offset;
         GDK_RUNTIME_ASSERT(static_cast<size_t>(script_sig.size()) >= offset + push_len);
-        const ecdsa_sig_t user_sig = ec_sig_from_der(script_sig.subspan(offset, push_len), has_sighash);
+        const auto user_der_sig = script_sig.subspan(offset, push_len);
+        const uint32_t user_sighash = user_der_sig[push_len - 1];
+        const ecdsa_sig_t user_sig = ec_sig_from_der(user_der_sig, has_sighash);
+        auto user_pair = std::make_pair(std::move(user_sig), user_sighash);
 
-        return std::vector<ecdsa_sig_t>({ ga_sig, user_sig });
+        return { std::move(ga_pair), std::move(user_pair) };
     }
 
     void scriptpubkey_multisig_from_bytes(byte_span_t keys, uint32_t threshold, std::vector<unsigned char>& out)
@@ -285,6 +281,14 @@ namespace sdk {
             keys.data(), keys.size(), threshold, flags, &out[0], out.size(), &written));
         GDK_RUNTIME_ASSERT(written <= out.size());
         out.resize(written);
+    }
+
+    size_t varbuff_get_length(size_t script_len)
+    {
+        unsigned char dummy[1];
+        size_t written;
+        GDK_VERIFY(wally_varbuff_get_length(dummy, script_len, &written));
+        return written;
     }
 
     std::vector<unsigned char> script_push_from_bytes(byte_span_t data)
@@ -329,6 +333,13 @@ namespace sdk {
         const uint32_t witness_ver = 0;
         const auto witness_program = witness_program_from_bytes(script, witness_ver, WALLY_SCRIPT_SHA256);
         return scriptpubkey_p2sh_from_hash160(hash160(witness_program));
+    }
+
+    uint32_t scriptpubkey_get_type(byte_span_t scriptpubkey)
+    {
+        size_t typ;
+        GDK_VERIFY(wally_scriptpubkey_get_type(scriptpubkey.data(), scriptpubkey.size(), &typ));
+        return static_cast<uint32_t>(typ);
     }
 
     std::vector<unsigned char> witness_program_from_bytes(byte_span_t script, uint32_t witness_ver, uint32_t flags)
@@ -456,12 +467,7 @@ namespace sdk {
 
     bool validate_hex(const std::string& hex, size_t len)
     {
-        try {
-            return h2b(hex).size() == len;
-        } catch (const std::exception&) {
-            // Fall through
-        }
-        return false;
+        return hex.size() == len * 2 && wally_hex_verify(hex.c_str()) == WALLY_OK;
     }
 
     std::vector<unsigned char> addr_segwit_to_bytes(const std::string& addr, const std::string& family)
@@ -500,6 +506,13 @@ namespace sdk {
         char* ret;
         GDK_VERIFY(wally_base58_from_bytes(data.data(), data.size(), BASE58_FLAG_CHECKSUM, &ret));
         return make_string(ret);
+    }
+
+    bool validate_base58check(const std::string& base58)
+    {
+        std::vector<unsigned char> ret(BASE58_CHECKSUM_LEN + 1);
+        size_t written;
+        return wally_base58_to_bytes(base58.data(), BASE58_FLAG_CHECKSUM, &ret[0], ret.size(), &written) == WALLY_OK;
     }
 
     std::vector<unsigned char> base58check_to_bytes(const std::string& base58)
@@ -564,17 +577,32 @@ namespace sdk {
         return ret;
     }
 
-    std::vector<unsigned char> ec_sig_to_der(byte_span_t sig, bool sighash)
+    ecdsa_sig_rec_t ec_sig_rec_from_bytes(byte_span_t private_key, byte_span_t hash, uint32_t flags)
     {
-        std::vector<unsigned char> der(EC_SIGNATURE_DER_MAX_LEN + (sighash ? 1 : 0));
+        ecdsa_sig_rec_t ret;
+        flags |= EC_FLAG_RECOVERABLE;
+        GDK_VERIFY(wally_ec_sig_from_bytes(
+            private_key.data(), private_key.size(), hash.data(), hash.size(), flags, ret.data(), ret.size()));
+        return ret;
+    }
+
+    std::vector<unsigned char> ec_sig_to_der(byte_span_t sig, uint32_t sighash)
+    {
+        std::vector<unsigned char> der(EC_SIGNATURE_DER_MAX_LEN + 1);
         size_t written;
         GDK_VERIFY(wally_ec_sig_to_der(sig.data(), sig.size(), der.data(), der.size(), &written));
         GDK_RUNTIME_ASSERT(written <= der.size());
         der.resize(written);
-        if (sighash) {
-            der.push_back(WALLY_SIGHASH_ALL);
-        }
+        der.push_back(sighash);
         return der;
+    }
+
+    std::string sig_only_to_der_hex(const ecdsa_sig_t& signature)
+    {
+        std::vector<unsigned char> der = ec_sig_to_der(signature);
+        // Remove sighash byte
+        der.pop_back();
+        return b2h(der);
     }
 
     ecdsa_sig_t ec_sig_from_der(byte_span_t der, bool sighash)
@@ -655,17 +683,18 @@ namespace sdk {
         return { private_key, ec_public_key_from_private_key(private_key) };
     }
 
-    std::vector<unsigned char> ecdh(byte_span_t public_key, byte_span_t private_key)
+    std::array<unsigned char, SHA256_LEN> ecdh(byte_span_t public_key, byte_span_t private_key)
     {
-        std::vector<unsigned char> ret(SHA256_LEN);
+        std::array<unsigned char, SHA256_LEN> ret;
         GDK_VERIFY(wally_ecdh(
             public_key.data(), public_key.size(), private_key.data(), private_key.size(), ret.data(), ret.size()));
         return ret;
     }
 
-    std::vector<unsigned char> ae_host_commit_from_bytes(byte_span_t host_entropy, uint32_t flags)
+    std::array<unsigned char, WALLY_HOST_COMMITMENT_LEN> ae_host_commit_from_bytes(
+        byte_span_t host_entropy, uint32_t flags)
     {
-        std::vector<unsigned char> ret(WALLY_HOST_COMMITMENT_LEN);
+        std::array<unsigned char, WALLY_HOST_COMMITMENT_LEN> ret;
         GDK_VERIFY(
             wally_ae_host_commit_from_bytes(host_entropy.data(), host_entropy.size(), flags, ret.data(), ret.size()));
         return ret;
@@ -678,6 +707,25 @@ namespace sdk {
                    host_entropy.data(), host_entropy.size(), signer_commitment.data(), signer_commitment.size(), flags,
                    sig.data(), sig.size())
             == WALLY_OK;
+    }
+
+    bool ec_scalar_verify(byte_span_t scalar)
+    {
+        return wally_ec_scalar_verify(scalar.data(), scalar.size()) == WALLY_OK;
+    }
+
+    std::array<unsigned char, EC_SCALAR_LEN> ec_scalar_add(byte_span_t a, byte_span_t b)
+    {
+        std::array<unsigned char, EC_SCALAR_LEN> ret;
+        GDK_VERIFY(wally_ec_scalar_add(a.data(), a.size(), b.data(), b.size(), ret.data(), ret.size()));
+        return ret;
+    }
+
+    std::array<unsigned char, EC_SCALAR_LEN> ec_scalar_subtract(byte_span_t a, byte_span_t b)
+    {
+        std::array<unsigned char, EC_SCALAR_LEN> ret;
+        GDK_VERIFY(wally_ec_scalar_subtract(a.data(), a.size(), b.data(), b.size(), ret.data(), ret.size()));
+        return ret;
     }
 
     //
@@ -700,6 +748,14 @@ namespace sdk {
         return v;
     }
 
+    std::array<unsigned char, EC_SCALAR_LEN> asset_scalar_offset(uint64_t value, byte_span_t abf, byte_span_t vbf)
+    {
+        std::array<unsigned char, EC_SCALAR_LEN> ret;
+        GDK_VERIFY(
+            wally_asset_scalar_offset(value, abf.data(), abf.size(), vbf.data(), vbf.size(), ret.data(), ret.size()));
+        return ret;
+    }
+
     std::array<unsigned char, ASSET_COMMITMENT_LEN> asset_value_commitment(
         uint64_t value, byte_span_t vbf, byte_span_t generator)
     {
@@ -707,6 +763,13 @@ namespace sdk {
         GDK_VERIFY(wally_asset_value_commitment(
             value, vbf.data(), vbf.size(), generator.data(), generator.size(), commitment.data(), commitment.size()));
         return commitment;
+    }
+
+    size_t asset_rangeproof_max_size(uint64_t value, int min_bits)
+    {
+        size_t written;
+        GDK_VERIFY(wally_asset_rangeproof_get_maximum_len(value, min_bits, &written));
+        return written;
     }
 
     std::vector<unsigned char> asset_rangeproof(uint64_t value, byte_span_t public_key, byte_span_t private_key,
@@ -719,8 +782,30 @@ namespace sdk {
             private_key.size(), asset.data(), asset.size(), abf.data(), abf.size(), vbf.data(), vbf.size(),
             commitment.data(), commitment.size(), extra.data(), extra.size(), generator.data(), generator.size(),
             min_value, exp, min_bits, rangeproof.data(), rangeproof.size(), &written));
+        GDK_RUNTIME_ASSERT(written <= rangeproof.size());
         rangeproof.resize(written);
         return rangeproof;
+    }
+
+    std::vector<unsigned char> explicit_rangeproof(
+        uint64_t value, byte_span_t nonce_hash, byte_span_t vbf, byte_span_t commitment, byte_span_t generator)
+    {
+        std::vector<unsigned char> rangeproof(ASSET_EXPLICIT_RANGEPROOF_MAX_LEN);
+        size_t written;
+        GDK_VERIFY(wally_explicit_rangeproof(value, nonce_hash.data(), nonce_hash.size(), vbf.data(), vbf.size(),
+            commitment.data(), commitment.size(), generator.data(), generator.size(), rangeproof.data(),
+            rangeproof.size(), &written));
+        GDK_RUNTIME_ASSERT(written <= rangeproof.size());
+        rangeproof.resize(written);
+        return rangeproof;
+    }
+
+    bool explicit_rangeproof_verify(
+        byte_span_t rangeproof, uint64_t value, byte_span_t commitment, byte_span_t generator)
+    {
+        return wally_explicit_rangeproof_verify(rangeproof.data(), rangeproof.size(), value, commitment.data(),
+                   commitment.size(), generator.data(), generator.size())
+            == WALLY_OK;
     }
 
     size_t asset_surjectionproof_size(size_t num_inputs)
@@ -739,6 +824,7 @@ namespace sdk {
             output_abf.size(), output_generator.data(), output_generator.size(), bytes.data(), bytes.size(),
             asset.data(), asset.size(), abf.data(), abf.size(), generator.data(), generator.size(), surjproof.data(),
             surjproof.size(), &written));
+        GDK_RUNTIME_ASSERT(written <= surjproof.size());
         surjproof.resize(written);
         return surjproof;
     }
@@ -775,11 +861,22 @@ namespace sdk {
         return std::make_tuple(asset_id, vbf, abf, value);
     }
 
+    bool is_possible_confidential_addr(const std::string& address)
+    {
+        const size_t expected_len = 2 + EC_PUBLIC_KEY_LEN + HASH160_LEN + BASE58_CHECKSUM_LEN;
+        size_t len;
+        return wally_base58_n_get_length(address.data(), address.size(), &len) == WALLY_OK && len == expected_len;
+    }
+
     std::string confidential_addr_to_addr(const std::string& address, uint32_t prefix)
     {
-        char* ret;
-        GDK_VERIFY(wally_confidential_addr_to_addr(address.c_str(), prefix, &ret));
-        return make_string(ret);
+        char* addr;
+        int ret = wally_confidential_addr_to_addr(address.c_str(), prefix, &addr);
+        if (ret != WALLY_OK) {
+            // Don't log using GDK_VERIFY as this occurs during non-error conditions
+            throw assertion_error(address + " is not confidential");
+        }
+        return make_string(addr);
     }
 
     std::string confidential_addr_to_addr_segwit(
@@ -842,6 +939,14 @@ namespace sdk {
         return priv_key;
     }
 
+    abf_vbf_t asset_blinding_key_to_abf_vbf(byte_span_t blinding_key, byte_span_t hash_prevouts, uint32_t output_index)
+    {
+        abf_vbf_t ret;
+        GDK_VERIFY(wally_asset_blinding_key_to_abf_vbf(blinding_key.data(), blinding_key.size(), hash_prevouts.data(),
+            hash_prevouts.size(), output_index, ret.data(), ret.size()));
+        return ret;
+    }
+
     //
     // Transactions
     //
@@ -886,12 +991,12 @@ namespace sdk {
         GDK_VERIFY(wally_tx_add_raw_output(tx.get(), satoshi, script.data(), script.size(), flags));
     }
 
-    void tx_add_elements_raw_output(const wally_tx_ptr& tx, byte_span_t script, byte_span_t asset, byte_span_t value,
-        byte_span_t nonce, byte_span_t surjectionproof, byte_span_t rangeproof)
+    void tx_add_elements_raw_output_at(const wally_tx_ptr& tx, size_t index, byte_span_t script, byte_span_t asset,
+        byte_span_t value, byte_span_t nonce, byte_span_t surjectionproof, byte_span_t rangeproof)
     {
-        GDK_VERIFY(wally_tx_add_elements_raw_output(tx.get(), script.data(), script.size(), asset.data(), asset.size(),
-            value.data(), value.size(), nonce.data(), nonce.size(), surjectionproof.data(), surjectionproof.size(),
-            rangeproof.data(), rangeproof.size(), 0));
+        GDK_VERIFY(wally_tx_add_elements_raw_output_at(tx.get(), index, script.data(), script.size(), asset.data(),
+            asset.size(), value.data(), value.size(), nonce.data(), nonce.size(), surjectionproof.data(),
+            surjectionproof.size(), rangeproof.data(), rangeproof.size(), 0));
     }
 
     void tx_elements_output_commitment_set(const wally_tx_ptr& tx, size_t index, byte_span_t asset, byte_span_t value,
@@ -969,6 +1074,14 @@ namespace sdk {
         size_t written;
         GDK_VERIFY(wally_tx_get_weight(tx.get(), &written));
         return written;
+    }
+
+    std::array<unsigned char, SHA256_LEN> get_hash_prevouts(byte_span_t txids, uint32_span_t output_indices)
+    {
+        std::array<unsigned char, SHA256_LEN> ret;
+        GDK_VERIFY(wally_get_hash_prevouts(
+            txids.data(), txids.size(), output_indices.data(), output_indices.size(), ret.data(), ret.size()));
+        return ret;
     }
 
     void tx_set_input_script(const wally_tx_ptr& tx, size_t index, byte_span_t script)
@@ -1050,5 +1163,40 @@ namespace sdk {
         GDK_VERIFY(::bip32_key_to_base58(hdkey, flags, &s));
         return make_string(s);
     }
+
+    wally_psbt_ptr psbt_from_base64(const std::string& b64)
+    {
+        struct wally_psbt* p;
+        GDK_VERIFY(wally_psbt_from_base64(b64.c_str(), 0, &p));
+        return wally_psbt_ptr(p);
+    }
+
+    std::string psbt_to_base64(const wally_psbt_ptr& psbt, uint32_t flags)
+    {
+        char* s;
+        GDK_VERIFY(wally_psbt_to_base64(psbt.get(), flags, &s));
+        return make_string(s);
+    }
+
+    wally_tx_ptr psbt_extract_tx(const wally_psbt_ptr& psbt)
+    {
+        struct wally_tx* p;
+        GDK_VERIFY(wally_psbt_extract(psbt.get(), WALLY_PSBT_EXTRACT_NON_FINAL, &p));
+        return wally_tx_ptr(p);
+    }
+
+    std::vector<unsigned char> psbt_get_input_redeem_script(const wally_psbt_ptr& psbt, size_t index)
+    {
+        size_t len;
+        GDK_VERIFY(wally_psbt_get_input_redeem_script_len(psbt.get(), index, &len));
+        std::vector<unsigned char> ret;
+        if (len) {
+            ret.resize(len);
+            GDK_VERIFY(wally_psbt_get_input_redeem_script(psbt.get(), index, ret.data(), len, &len));
+            GDK_RUNTIME_ASSERT(len == ret.size());
+        }
+        return ret;
+    }
+
 } /* namespace sdk */
 } /* namespace ga */

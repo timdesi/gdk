@@ -28,8 +28,7 @@ del swig_import_helper
 %{
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #define SWIG_FILE_WITH_INIT
-#include "../../include/gdk.h"
-#include "../../include/greenlight.h"
+#include "gdk.h"
 #include <limits.h>
 
 static int gdk_throw(int result, const char* default_message)
@@ -165,11 +164,11 @@ static int _python_set_callback_handler(PyObject* obj, PyObject* arg)
     if (PyErr_Occurred())
         goto end;
 
-    if (old_arg)
-        Py_DecRef(old_arg);
-
     if (PyCapsule_SetContext(obj, arg))
         goto end;
+
+    if (old_arg)
+        Py_DecRef(old_arg);
 
     Py_IncRef(arg);
 
@@ -191,10 +190,11 @@ static void _python_destroy_GA_session(PyObject* obj)
     p = (struct GA_session *)get_from_capsule(obj, "struct GA_session *");
     if (p) {
         _python_set_callback_handler(obj, Py_None);
-        GA_destroy_session(p);
         PyCapsule_SetDestructor(obj, NULL);
     }
     SWIG_PYTHON_THREAD_END_BLOCK;
+    if (p)
+        GA_destroy_session(p);
 }
 
 static int _python_destroy_session(PyObject* obj)
@@ -209,11 +209,11 @@ static void _python_destroy_GA_auth_handler(PyObject* obj)
 
     SWIG_PYTHON_THREAD_BEGIN_BLOCK;
     p = (struct GA_auth_handler *)get_from_capsule(obj, "struct GA_auth_handler *");
-    if (p) {
-        GA_destroy_auth_handler(p);
+    if (p)
         PyCapsule_SetDestructor(obj, NULL);
-    }
     SWIG_PYTHON_THREAD_END_BLOCK;
+    if (p)
+        GA_destroy_auth_handler(p);
 }
 %}
 
@@ -322,8 +322,7 @@ typedef unsigned int uint32_t;
 
 %rename("%(regex:/^GA_(.+)/\\1/)s", %$isfunction) "";
 
-%include "../include/gdk.h"
-%include "../include/greenlight.h"
+%include "gdk.h"
 
 static int _python_set_callback_handler(PyObject* obj, PyObject* arg);
 static int _python_destroy_session(PyObject* obj);

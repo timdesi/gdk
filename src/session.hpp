@@ -3,11 +3,11 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 
-#include "include/gdk.h"
+#include "gdk.h"
 
-#include "boost_wrapper.hpp"
 #include "ga_wally.hpp"
 
 namespace ga {
@@ -37,7 +37,7 @@ namespace sdk {
         nlohmann::json get_proxy_settings();
 
         nlohmann::json http_request(const nlohmann::json& params);
-        nlohmann::json refresh_assets(const nlohmann::json& params);
+        void refresh_assets(const nlohmann::json& params);
         nlohmann::json get_assets(const nlohmann::json& params);
         nlohmann::json validate_asset_domain_name(const nlohmann::json& params);
 
@@ -54,6 +54,7 @@ namespace sdk {
         nlohmann::json get_twofactor_config(bool reset_cached = false);
 
         nlohmann::json encrypt_with_pin(const nlohmann::json& details);
+        nlohmann::json decrypt_with_pin(const nlohmann::json& details);
         void disable_all_pin_logins();
 
         nlohmann::json get_unspent_outputs_for_private_key(
@@ -74,9 +75,6 @@ namespace sdk {
         nlohmann::json convert_amount(const nlohmann::json& amount_json);
 
         const network_parameters& get_network_parameters() const;
-
-        // Greenlight methods
-        nlohmann::json gl_call(const char* method, const nlohmann::json& params);
 
         impl_ptr get_nonnull_impl() const;
 

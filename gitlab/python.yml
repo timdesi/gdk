@@ -1,0 +1,56 @@
+
+include:
+  - local: "gitlab/common.yml"
+
+
+
+.linux-wheel:
+  extends: [.python-image, .py_release ]
+  stage: build
+  needs: [ test_format ]
+  script:
+    - source /root/python-$PYTHON_VERSION-venv/bin/activate
+    - ./tools/build.sh --gcc --buildtype release --install $INSTALL_PATH --no-deps-rebuild --python-version venv --external-deps-dir /prebuild/gcc --parallel 16
+    - auditwheel repair -w wheelhouse $INSTALL_PATH/share/python/*.whl
+
+
+build-linux-wheel-39:
+  extends: .linux-wheel
+  variables:
+    PYTHON_VERSION: cp39-cp39
+
+
+build-wheel-release:
+  extends: .linux-wheel
+  when: manual
+  parallel:
+    matrix:
+      - PYTHON_VERSION: [cp38-cp38, cp39-cp39, pp39-pypy39_pp73, cp310-cp310, cp311-cp311]
+
+
+
+release-python:
+  tags:
+    - garelease
+  stage: release
+  needs: [ build-linux-wheel-39, build_clang_osx]
+  script:
+    - mkdir gdk_dist
+    - find wheelhouse/ -name *.whl -exec mv {} gdk_dist/ \;
+    - cd gdk_dist
+    - /opt/process_release
+  artifacts:
+    name: "$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA"
+    expire_in: 14 days
+    paths:
+    - $CI_PROJECT_DIR/gdk_dist
+    when: on_success
+
+
+upload-python-gcloud:
+  extends: .gcloud-publish
+  needs: [ release-python ]
+  script:
+    - url=${GCLOUD_URL}/${subfolder}/python
+    - echo ${url}
+    - gsutil cp -r $CI_PROJECT_DIR/gdk_dist/* ${url}

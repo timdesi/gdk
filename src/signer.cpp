@@ -64,22 +64,39 @@ namespace sdk {
                     return { { "seed", mnemonic } };
                 }
             }
+
+            const auto core_descriptors_p = credentials.find("core_descriptors");
+            const auto slip132_extended_pubkeys_p = credentials.find("slip132_extended_pubkeys");
+            if (core_descriptors_p != credentials.end()) {
+                if (slip132_extended_pubkeys_p != credentials.end()) {
+                    throw user_error(
+                        "You can only provide either 'core_descriptors' or 'slip132_extended_pubkeys', not both");
+                }
+                // Watch-only login
+                return { { "core_descriptors", *core_descriptors_p } };
+            }
+
+            if (slip132_extended_pubkeys_p != credentials.end()) {
+                // Watch-only login
+                return { { "slip132_extended_pubkeys", *slip132_extended_pubkeys_p } };
+            }
+
             throw user_error("Invalid credentials");
         }
 
         static const nlohmann::json GREEN_DEVICE_JSON{ { "device_type", "green-backend" }, { "supports_low_r", true },
             { "supports_arbitrary_scripts", true }, { "supports_host_unblinding", false },
-            { "supports_liquid", liquid_support_level::lite },
+            { "supports_external_blinding", true }, { "supports_liquid", liquid_support_level::lite },
             { "supports_ae_protocol", ae_protocol_support_level::none } };
 
         static const nlohmann::json WATCH_ONLY_DEVICE_JSON{ { "device_type", "watch-only" }, { "supports_low_r", true },
             { "supports_arbitrary_scripts", true }, { "supports_host_unblinding", true },
-            { "supports_liquid", liquid_support_level::lite },
+            { "supports_external_blinding", true }, { "supports_liquid", liquid_support_level::lite },
             { "supports_ae_protocol", ae_protocol_support_level::none } };
 
         static const nlohmann::json SOFTWARE_DEVICE_JSON{ { "device_type", "software" }, { "supports_low_r", true },
             { "supports_arbitrary_scripts", true }, { "supports_host_unblinding", true },
-            { "supports_liquid", liquid_support_level::lite },
+            { "supports_external_blinding", true }, { "supports_liquid", liquid_support_level::lite },
             { "supports_ae_protocol", ae_protocol_support_level::none } };
 
         static nlohmann::json get_device_json(const nlohmann::json& hw_device, const nlohmann::json& credentials)
@@ -92,7 +109,8 @@ namespace sdk {
                 if (!credentials.empty()) {
                     throw user_error("HWW/remote signer and login credentials cannot be used together");
                 }
-            } else if (credentials.contains("username")) {
+            } else if (credentials.contains("username") || credentials.contains("slip132_extended_pubkeys")
+                || credentials.contains("core_descriptors")) {
                 ret = WATCH_ONLY_DEVICE_JSON;
             } else if (credentials.contains("seed")) {
                 ret = SOFTWARE_DEVICE_JSON;
@@ -104,16 +122,20 @@ namespace sdk {
             json_add_if_missing(ret, "supports_low_r", false, overwrite_null);
             json_add_if_missing(ret, "supports_arbitrary_scripts", false, overwrite_null);
             json_add_if_missing(ret, "supports_host_unblinding", false, overwrite_null);
+            json_add_if_missing(ret, "supports_external_blinding", true, overwrite_null);
             json_add_if_missing(ret, "supports_liquid", liquid_support_level::none, overwrite_null);
             json_add_if_missing(ret, "supports_ae_protocol", ae_protocol_support_level::none, overwrite_null);
             json_add_if_missing(ret, "device_type", std::string("hardware"), overwrite_null);
-            if (ret.at("device_type") == "hardware") {
+            const auto device_type = json_get_value(ret, "device_type");
+            if (device_type == "hardware") {
                 if (ret.value("name", std::string()).empty()) {
                     throw user_error("Hardware device JSON requires a non-empty 'name' element");
                 }
-            } else if (ret.at("device_type") == "green-backend") {
+            } else if (device_type == "green-backend") {
                 // Don't allow overriding Green backend settings
                 ret = GREEN_DEVICE_JSON;
+            } else if (device_type != "software" && device_type != "watch-only") {
+                throw user_error(std::string("Unknown device type ") + device_type);
             }
             return ret;
         }
@@ -203,6 +225,8 @@ namespace sdk {
 
     bool signer::supports_host_unblinding() const { return m_device["supports_host_unblinding"]; }
 
+    bool signer::supports_external_blinding() const { return m_device["supports_external_blinding"]; }
+
     ae_protocol_support_level signer::get_ae_protocol_support() const { return m_device["supports_ae_protocol"]; }
 
     bool signer::use_ae_protocol() const { return get_ae_protocol_support() != ae_protocol_support_level::none; }
@@ -288,6 +312,13 @@ namespace sdk {
         return ec_sig_from_bytes(gsl::make_span(derived->priv_key).subspan(1), hash);
     }
 
+    ecdsa_sig_rec_t signer::sign_rec_hash(uint32_span_t path, byte_span_t hash)
+    {
+        GDK_RUNTIME_ASSERT(m_master_key.get());
+        wally_ext_key_ptr derived = derive(m_master_key, path);
+        return ec_sig_rec_from_bytes(gsl::make_span(derived->priv_key).subspan(1), hash);
+    }
+
     bool signer::has_master_blinding_key() const
     {
         std::unique_lock<std::mutex> locker{ m_mutex };
@@ -298,7 +329,7 @@ namespace sdk {
     {
         std::unique_lock<std::mutex> locker{ m_mutex };
         GDK_RUNTIME_ASSERT(m_master_blinding_key.has_value());
-        return m_master_blinding_key.get();
+        return m_master_blinding_key.value();
     }
 
     void signer::set_master_blinding_key(const std::string& blinding_key_hex)

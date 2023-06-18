@@ -53,12 +53,6 @@ namespace sdk {
         // create_subaccount if the xpub missing from the store.
         std::vector<uint32_t> get_subaccount_pointers();
 
-        // Get the subaccount xpub from the rust store if available.
-        // If the account or xpub is missing,
-        // the caller should obtain it from the signer and set it
-        // create_subaccount.
-        nlohmann::json get_subaccount_xpub(uint32_t subaccount);
-
         void change_settings_limits(const nlohmann::json& limit_details, const nlohmann::json& twofactor_data);
         nlohmann::json get_transactions(const nlohmann::json& details);
 
@@ -76,7 +70,7 @@ namespace sdk {
         bool is_rbf_enabled() const;
         bool is_watch_only() const;
         void ensure_full_session();
-        nlohmann::json get_settings();
+        nlohmann::json get_settings() const;
         nlohmann::json get_post_login_data();
         void change_settings(const nlohmann::json& settings);
 
@@ -104,6 +98,7 @@ namespace sdk {
         nlohmann::json cancel_twofactor_reset(const nlohmann::json& twofactor_data);
 
         nlohmann::json encrypt_with_pin(const nlohmann::json& details);
+        nlohmann::json decrypt_with_pin(const nlohmann::json& details);
 
         nlohmann::json get_unspent_outputs(const nlohmann::json& details, unique_pubkeys_and_scripts_t& missing);
         nlohmann::json get_unspent_outputs_for_private_key(
@@ -112,10 +107,8 @@ namespace sdk {
         wally_tx_ptr get_raw_transaction_details(const std::string& txhash_hex) const;
         nlohmann::json get_transaction_details(const std::string& txhash_hex) const;
 
-        nlohmann::json create_transaction(const nlohmann::json& details);
-        nlohmann::json user_sign_transaction(const nlohmann::json& details);
         nlohmann::json service_sign_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data);
-        nlohmann::json psbt_sign(const nlohmann::json& details);
+        nlohmann::json get_scriptpubkey_data(byte_span_t scriptpubkey);
         nlohmann::json send_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data);
         std::string broadcast_transaction(const std::string& tx_hex);
 
@@ -141,7 +134,6 @@ namespace sdk {
         amount get_min_fee_rate() const;
         amount get_default_fee_rate() const;
         uint32_t get_block_height() const;
-        amount get_dust_threshold() const;
         nlohmann::json get_spending_limits() const;
         bool is_spending_limits_decrease(const nlohmann::json& limit_details);
         void set_local_encryption_keys(const pub_key_t& public_key, std::shared_ptr<signer> signer);
@@ -150,6 +142,8 @@ namespace sdk {
         user_pubkeys& get_recovery_pubkeys();
 
         void disable_all_pin_logins();
+
+        nlohmann::json get_address_data(const nlohmann::json& details);
 
     private:
         static void GDKRUST_notif_handler(void* self_context, char* json);

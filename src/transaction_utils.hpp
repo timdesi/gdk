@@ -4,6 +4,7 @@
 
 #include <array>
 #include <memory>
+#include <set>
 #include <utility>
 
 #include "amount.hpp"
@@ -32,7 +33,7 @@ namespace sdk {
         extern const std::string p2sh;
         extern const std::string p2wsh; // Actually p2sh-p2wsh
         extern const std::string csv;
-    }; // namespace address_type
+    } // namespace address_type
 
     const uint32_t NO_CHANGE_INDEX = 0xffffffff;
 
@@ -44,19 +45,18 @@ namespace sdk {
     std::string get_address_from_script(
         const network_parameters& net_params, byte_span_t script, const std::string& addr_type);
 
+    std::string get_address_from_scriptpubkey(const network_parameters& net_params, byte_span_t scriptpubkey);
+
     std::vector<unsigned char> output_script_from_utxo(const network_parameters& net_params, ga_pubkeys& pubkeys,
         user_pubkeys& usr_pubkeys, user_pubkeys& recovery_pubkeys, const nlohmann::json& utxo);
 
-    // Returns the 32 byte asset id in hex, or "btc" for bitcoin
-    std::string asset_id_from_json(const network_parameters& net_params, const nlohmann::json& json);
-
     // Make a multisig scriptSig
     std::vector<unsigned char> input_script(bool low_r, const std::vector<unsigned char>& prevout_script,
-        const ecdsa_sig_t& user_sig, const ecdsa_sig_t& ga_sig);
+        const ecdsa_sig_t& user_sig, const ecdsa_sig_t& ga_sig, uint32_t user_sighash, uint32_t ga_sighash);
 
     // Make a multisig scriptSig with a user signature and PUSH(0) marker for the GA sig
-    std::vector<unsigned char> input_script(
-        bool low_r, const std::vector<unsigned char>& prevout_script, const ecdsa_sig_t& user_sig);
+    std::vector<unsigned char> input_script(bool low_r, const std::vector<unsigned char>& prevout_script,
+        const ecdsa_sig_t& user_sig, uint32_t user_sighash);
 
     // Make a multisig scriptSig with dummy signatures for (fee estimation)
     std::vector<unsigned char> dummy_input_script(bool low_r, const std::vector<unsigned char>& prevout_script);
@@ -66,40 +66,50 @@ namespace sdk {
     std::vector<unsigned char> witness_script(byte_span_t script, uint32_t witness_ver);
 
     // Compute the fee for a tx
-    amount get_tx_fee(const wally_tx_ptr& tx, amount min_fee_rate, amount fee_rate);
+    amount get_tx_fee(
+        const network_parameters& net_params, const wally_tx_ptr& tx, amount min_fee_rate, amount fee_rate);
 
     // Get scriptpubkey from address (address is expected to be valid)
     std::vector<unsigned char> scriptpubkey_from_address(
-        const network_parameters& net_params, const std::string& address, bool confidential = true);
+        const network_parameters& net_params, const std::string& address, bool allow_unconfidential);
 
     // Set the error in a transaction, if it hasn't been set already
-    void set_tx_error(nlohmann::json& result, const std::string& error);
-
-    // Add an output to a tx given its address
-    amount add_tx_output(const network_parameters& net_params, nlohmann::json& result, wally_tx_ptr& tx,
-        const std::string& address, amount::value_type satoshi = 0, const std::string& asset_id = {});
-
-    // Add a fee output to a tx, returns the index in tx->outputs
-    size_t add_tx_fee_output(const network_parameters& net_params, wally_tx_ptr& tx, amount::value_type satoshi);
+    void set_tx_error(nlohmann::json& result, const std::string& error, bool overwrite = false);
 
     void set_tx_output_commitment(
         wally_tx_ptr& tx, uint32_t index, const std::string& asset_id, amount::value_type satoshi);
 
-    std::string validate_tx_addressee(
-        const network_parameters& net_params, nlohmann::json& result, nlohmann::json& addressee);
+    std::string validate_tx_addressee(session_impl& session, nlohmann::json& addressee);
 
     // Add an output from a JSON addressee
-    amount add_tx_addressee(session_impl& session, const network_parameters& net_params, nlohmann::json& result,
-        wally_tx_ptr& tx, nlohmann::json& addressee);
+    amount add_tx_addressee_output(
+        session_impl& session, nlohmann::json& result, wally_tx_ptr& tx, nlohmann::json& addressee);
 
-    vbf_t generate_final_vbf(byte_span_t input_abfs, byte_span_t input_vbfs, uint64_span_t input_values,
-        const std::vector<abf_t>& output_abfs, const std::vector<vbf_t>& output_vbfs, uint32_t num_inputs);
+    // Add an output from a JSON change output, returns the index in tx->outputs
+    // Note the output is zero valued and is expected to be updated later
+    size_t add_tx_change_output(
+        session_impl& session, nlohmann::json& result, wally_tx_ptr& tx, const std::string& asset_id);
+
+    // Add a fee output to a tx, returns the index in tx->outputs
+    size_t add_tx_fee_output(session_impl& session, nlohmann::json& result, wally_tx_ptr& tx);
 
     // Update the json tx size/fee rate information from tx
     void update_tx_size_info(const network_parameters& net_params, const wally_tx_ptr& tx, nlohmann::json& result);
 
+    // Get the output index of an assets change, or NO_CHANGE_INDEX
+    uint32_t get_tx_change_index(nlohmann::json& result, const std::string& asset_id);
+
     // Update the json tx representation with info from tx
-    void update_tx_info(const network_parameters& net_params, const wally_tx_ptr& tx, nlohmann::json& result);
+    void update_tx_info(session_impl& session, const wally_tx_ptr& tx, nlohmann::json& result);
+
+    // Compute the subaccounts a tx uses from its inputs
+    std::set<uint32_t> get_tx_subaccounts(const nlohmann::json& details);
+
+    // Return the single subaccount in subaccounts or throw an error
+    uint32_t get_single_subaccount(const std::set<uint32_t>& subaccounts);
+
+    // Returns true if a tx has AMP inputs
+    bool tx_has_amp_inputs(session_impl& session, const nlohmann::json& details);
 
     // Set the locktime on tx to avoid fee sniping
     void set_anti_snipe_locktime(const wally_tx_ptr& tx, uint32_t current_block_height);

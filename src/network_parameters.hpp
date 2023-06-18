@@ -8,7 +8,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "include/gdk.h"
+#include "gdk.h"
 
 namespace ga {
 namespace sdk {
@@ -46,30 +46,29 @@ namespace sdk {
         std::string get_pin_server_public_key() const;
         std::string pub_key() const;
         std::string gait_onion() const;
-        std::string policy_asset() const;
+        std::string get_policy_asset() const;
         std::string bip21_prefix() const;
         std::string bech32_prefix() const;
         std::string blech32_prefix() const;
         unsigned char btc_version() const;
         unsigned char btc_p2sh_version() const;
         uint32_t blinded_prefix() const;
-        int ct_exponent() const;
-        int ct_bits() const;
         bool is_main_net() const;
         bool is_liquid() const;
         bool is_development() const;
         bool is_electrum() const;
-        bool is_lightning() const;
         bool use_tor() const;
         bool is_spv_enabled() const;
         bool electrum_tls() const;
         std::string user_agent() const;
         std::string get_connection_string() const;
+        std::string get_blob_server_url() const;
         std::string get_registry_connection_string() const;
         bool is_tls_connection() const;
         std::vector<uint32_t> csv_buckets() const;
         uint32_t cert_expiry_threshold() const;
         uint32_t get_max_reorg_blocks() const;
+        std::string get_price_url() const;
 
     private:
         nlohmann::json m_details;

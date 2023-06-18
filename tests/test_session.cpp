@@ -5,6 +5,7 @@
 #include "src/session_impl.hpp"
 #include <assert.h>
 #include <cstdlib>
+#include <iostream>
 #include <nlohmann/json.hpp>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,7 +22,7 @@ static std::string envstr(const char* name, const std::string& default_)
 static uint64_t envnum(const char* name, const uint64_t default_)
 {
     const auto p = std::getenv(name);
-    return p ? boost::lexical_cast<uint64_t>(p) : default_;
+    return p ? static_cast<uint64_t>(atoi(p)) : default_;
 }
 #endif
 

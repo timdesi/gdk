@@ -1,8 +1,13 @@
-#include "http_client.hpp"
+#include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/predicate.hpp>
+
 #include "assertion.hpp"
+#include "autobahn_wrapper.hpp"
+#include "http_client.hpp"
 #include "logging.hpp"
 #include "memory.hpp"
 #include "network_parameters.hpp"
+#include "socks_client.hpp"
 #include "utils.hpp"
 
 namespace asio = boost::asio;
@@ -165,10 +170,10 @@ namespace sdk {
         }
 
         ctx->set_verify_callback(
-            [pins, host_name, cert_expiry_threshold](bool preverified, asio::ssl::verify_context& ctx) {
+            [pins, host_name, cert_expiry_threshold](bool preverified, asio::ssl::verify_context& vctx) {
                 // Pre-verification includes checking for things like expired certificates
                 if (!preverified) {
-                    const int err = X509_STORE_CTX_get_error(ctx.native_handle());
+                    const int err = X509_STORE_CTX_get_error(vctx.native_handle());
                     GDK_LOG_SEV(log_level::error) << "x509 certificate error: " << X509_verify_cert_error_string(err);
                     return false;
                 }
@@ -177,13 +182,13 @@ namespace sdk {
                 // certificate chain
                 // If no pins are specified skip the check altogether
                 const bool have_pins = !pins.empty() && !pins[0].empty();
-                if (have_pins && !check_cert_pins(pins, ctx, cert_expiry_threshold)) {
+                if (have_pins && !check_cert_pins(pins, vctx, cert_expiry_threshold)) {
                     GDK_LOG_SEV(log_level::error) << "Failing ssl verification, failed pin check";
                     return false;
                 }
 
                 // Check the host name matches the target
-                return asio::ssl::rfc2818_verification{ host_name }(true, ctx);
+                return asio::ssl::rfc2818_verification{ host_name }(true, vctx);
             });
 
         return ctx;
@@ -198,7 +203,7 @@ namespace sdk {
 
     std::future<nlohmann::json> http_client::request(beast::http::verb verb, const nlohmann::json& params)
     {
-        GDK_LOG_NAMED_SCOPE("http_client");
+        GDK_LOG_SEV(log_level::debug) << "http_client";
 
         m_host = params.at("host");
         m_port = params.at("port");
@@ -222,18 +227,26 @@ namespace sdk {
         m_request.set(beast::http::field::host, m_host);
         m_request.set(beast::http::field::user_agent, "GreenAddress SDK");
 
-        const auto data_p = params.find("data");
-        if (data_p != params.end()) {
-            m_request.body() = data_p->dump();
-            m_request.prepare_payload();
+        const auto headers = params.value("headers", nlohmann::json{});
+        std::string content_type;
+        for (const auto& header : headers.items()) {
+            auto field = beast::http::string_to_field(header.key());
+            std::string value = header.value();
+            if (field == beast::http::field::content_type) {
+                content_type = value;
+            }
+            m_request.set(field, value);
         }
 
-        const auto headers = params.value("headers", nlohmann::json{});
-        if (!headers.empty()) {
-            for (const auto& header : headers.items()) {
-                const std::string value = header.value();
-                m_request.set(beast::http::string_to_field(header.key()), value);
+        const auto data_p = params.find("data");
+        if (data_p != params.end()) {
+            if (content_type.empty() || data_p->type() == nlohmann::json::value_t::object
+                || boost::algorithm::starts_with(content_type, "application/json")) {
+                m_request.body() = data_p->dump();
+            } else {
+                m_request.body() = data_p->get<std::string>();
             }
+            m_request.prepare_payload();
         }
 
         m_accept = params.value("accept", "");
@@ -254,7 +267,7 @@ namespace sdk {
 
     void http_client::on_resolve(beast::error_code ec, asio::ip::tcp::resolver::results_type results)
     {
-        GDK_LOG_NAMED_SCOPE("http_client:on_resolve");
+        GDK_LOG_SEV(log_level::debug) << "http_client:on_resolve";
 
         NET_ERROR_CODE_CHECK("on resolve", ec);
         get_lowest_layer().expires_after(m_timeout);
@@ -263,7 +276,7 @@ namespace sdk {
 
     void http_client::on_write(beast::error_code ec, size_t __attribute__((unused)) bytes_transferred)
     {
-        GDK_LOG_NAMED_SCOPE("http_client:on_write");
+        GDK_LOG_SEV(log_level::debug) << "http_client:on_write";
 
         NET_ERROR_CODE_CHECK("on write", ec);
         get_lowest_layer().expires_after(m_timeout);
@@ -273,7 +286,7 @@ namespace sdk {
 
     void http_client::on_read(beast::error_code ec, size_t __attribute__((unused)) bytes_transferred)
     {
-        GDK_LOG_NAMED_SCOPE("http_client:on_read");
+        GDK_LOG_SEV(log_level::debug) << "http_client:on_read";
 
         NET_ERROR_CODE_CHECK("on read", ec);
         get_lowest_layer().cancel();
@@ -282,7 +295,7 @@ namespace sdk {
 
     void http_client::on_shutdown(beast::error_code ec)
     {
-        GDK_LOG_NAMED_SCOPE("http_client");
+        GDK_LOG_SEV(log_level::debug) << "http_client";
 
         if (ec && ec != asio::error::eof && ec != asio::ssl::error::stream_truncated) {
             set_exception(ec.message());
@@ -356,7 +369,7 @@ namespace sdk {
     void tls_http_client::on_connect(
         beast::error_code ec, __attribute__((unused)) const asio::ip::tcp::resolver::results_type::endpoint_type& type)
     {
-        GDK_LOG_NAMED_SCOPE("http_client:on_connect");
+        GDK_LOG_SEV(log_level::debug) << "http_client:on_connect";
 
         NET_ERROR_CODE_CHECK("on connect", ec);
         async_handshake();
@@ -364,7 +377,7 @@ namespace sdk {
 
     void tls_http_client::on_handshake(beast::error_code ec)
     {
-        GDK_LOG_NAMED_SCOPE("http_client:on_handshake");
+        GDK_LOG_SEV(log_level::debug) << "http_client:on_handshake";
 
         NET_ERROR_CODE_CHECK("on handshake", ec);
         get_lowest_layer().expires_after(m_timeout);
@@ -456,7 +469,7 @@ namespace sdk {
     void tcp_http_client::on_connect(boost::beast::error_code ec,
         __attribute__((unused)) const boost::asio::ip::tcp::resolver::results_type::endpoint_type& type)
     {
-        GDK_LOG_NAMED_SCOPE("tcp_http_client");
+        GDK_LOG_SEV(log_level::debug) << "tcp_http_client";
 
         NET_ERROR_CODE_CHECK("on connect", ec);
 

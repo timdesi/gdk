@@ -2,9 +2,10 @@
 #define GDK_SIGNER_HPP
 #pragma once
 
-#include "boost_wrapper.hpp"
 #include "ga_wally.hpp"
+#include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 
 namespace ga {
 namespace sdk {
@@ -50,23 +51,26 @@ namespace sdk {
         signer& operator=(signer&&) = delete;
         virtual ~signer();
 
-        // Returns true if if this signers credentials and HW device match 'other'
+        // Returns true if this signers credentials and HW device match 'other'
         bool is_compatible_with(std::shared_ptr<signer> other) const;
 
         // Return the mnemonic associated with this signer (empty if none available)
         std::string get_mnemonic(const std::string& password);
 
-        // Returns true if if this signer produces only low-r signatures
+        // Returns true if this signer produces only low-r signatures
         bool supports_low_r() const;
 
-        // Returns true if if this signer can sign arbitrary scripts
+        // Returns true if this signer can sign arbitrary scripts
         bool supports_arbitrary_scripts() const;
 
         // Returns the level of liquid support
         liquid_support_level get_liquid_support() const;
 
-        // Returns true if if this signer can export the master blinding key
+        // Returns true if this signer can export the master blinding key
         bool supports_host_unblinding() const;
+
+        // Returns true if this signer can sign txs with externally blinded outputs
+        bool supports_external_blinding() const;
 
         // Returns how this signer supports the Anti-Exfil protocol
         ae_protocol_support_level get_ae_protocol_support() const;
@@ -114,6 +118,9 @@ namespace sdk {
         // Return the ECDSA signature for a hash using the bip32 key 'm/<path>'
         ecdsa_sig_t sign_hash(uint32_span_t path, byte_span_t hash);
 
+        // Return the recoverable ECDSA signature for a hash using the bip32 key 'm/<path>'
+        ecdsa_sig_rec_t sign_rec_hash(uint32_span_t path, byte_span_t hash);
+
         priv_key_t get_blinding_key_from_script(byte_span_t script);
 
         std::vector<unsigned char> get_blinding_pubkey_from_script(byte_span_t script);
@@ -132,7 +139,7 @@ namespace sdk {
         wally_ext_key_ptr m_master_key;
         // Mutable post construction
         mutable std::mutex m_mutex;
-        boost::optional<blinding_key_t> m_master_blinding_key;
+        std::optional<blinding_key_t> m_master_blinding_key;
         cache_t m_cached_bip32_xpubs;
     };
 

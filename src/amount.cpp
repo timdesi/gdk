@@ -3,10 +3,10 @@
 #include <iostream>
 #include <stdexcept>
 
-#include "boost_wrapper.hpp"
 #include "exception.hpp"
 #include "ga_strings.hpp"
-#include "include/wally_wrapper.h"
+#include "wally_wrapper.h"
+#include <boost/multiprecision/cpp_dec_float.hpp>
 
 #include "amount.hpp"
 #include "assertion.hpp"
@@ -39,6 +39,8 @@ namespace sdk {
         : amount(json_value.get<amount::value_type>())
     {
     }
+
+    amount::value_type amount::get_max_satoshi() { return SATOSHI_MAX; }
 
     nlohmann::json amount::convert(
         const nlohmann::json& amount_json, const std::string& fiat_currency, const std::string& fiat_rate)
@@ -74,41 +76,38 @@ namespace sdk {
         const bool is_current = !fiat_rate.empty() && !fiat_currency.empty();
 
         const conversion_type COIN_VALUE_WITH_PRECISION(std::pow(10, precision));
-        int64_t satoshi;
+        signed_value_type satoshi;
 
         // Compute satoshi from our input
         if (satoshi_p != end_p) {
             satoshi = *satoshi_p;
         } else if (btc_p != end_p) {
             const std::string btc_str = *btc_p;
-            satoshi = (conversion_type(btc_str) * COIN_VALUE_DECIMAL).convert_to<value_type>();
+            satoshi = (conversion_type(btc_str) * COIN_VALUE_DECIMAL).convert_to<signed_value_type>();
         } else if (mbtc_p != end_p) {
             const std::string mbtc_str = *mbtc_p;
-            satoshi = (conversion_type(mbtc_str) * COIN_VALUE_DECIMAL_MBTC).convert_to<value_type>();
+            satoshi = (conversion_type(mbtc_str) * COIN_VALUE_DECIMAL_MBTC).convert_to<signed_value_type>();
         } else if (ubtc_p != end_p || bits_p != end_p) {
             const std::string ubtc_str = *(ubtc_p == end_p ? bits_p : ubtc_p);
-            satoshi = (conversion_type(ubtc_str) * COIN_VALUE_DECIMAL_UBTC).convert_to<value_type>();
+            satoshi = (conversion_type(ubtc_str) * COIN_VALUE_DECIMAL_UBTC).convert_to<signed_value_type>();
         } else if (sats_p != end_p) {
             const std::string sats_str = *sats_p;
-            satoshi = (conversion_type(sats_str)).convert_to<value_type>();
+            satoshi = (conversion_type(sats_str)).convert_to<signed_value_type>();
         } else if (asset_p != end_p) {
             const std::string asset_str = *asset_p;
-            satoshi = (conversion_type(asset_str) * COIN_VALUE_WITH_PRECISION).convert_to<value_type>();
+            satoshi = (conversion_type(asset_str) * COIN_VALUE_WITH_PRECISION).convert_to<signed_value_type>();
         } else {
             if (fiat_rate_used.empty()) {
                 throw user_error(res::id_your_favourite_exchange_rate_is);
             }
             const std::string fiat_str = *fiat_p;
             const conversion_type btc_decimal = conversion_type(fiat_str) / conversion_type(fiat_rate_used);
-            satoshi = (btc_type(btc_decimal) * COIN_VALUE_DECIMAL).convert_to<value_type>();
-        }
-        if (satoshi < 0) {
-            throw user_error(res::id_invalid_amount);
+            satoshi = (btc_type(btc_decimal) * COIN_VALUE_DECIMAL).convert_to<signed_value_type>();
         }
 
         // Check upper limit for btc type (ie. non-asset) inputs
         // Note: an asset_info block indicating btc denomination would have failed key_count check above
-        if (asset_p == end_p && satoshi > SATOSHI_MAX) {
+        if (asset_p == end_p && (satoshi > SATOSHI_MAX || satoshi < -SATOSHI_MAX)) {
             throw user_error(res::id_invalid_amount);
         }
 
@@ -146,11 +145,10 @@ namespace sdk {
         }
     }
 
-    nlohmann::json amount::convert_fiat_cents(
-        value_type cents, const std::string& fiat_currency, const std::string& fiat_rate)
+    nlohmann::json amount::convert_fiat_cents(value_type cents, const std::string& fiat_currency)
     {
         const conversion_type fiat_decimal = conversion_type(cents) / COIN_VALUE_100;
-        return convert({ { "fiat", fmt(fiat_type(fiat_decimal)) } }, fiat_currency, fiat_rate);
+        return nlohmann::json({ { "fiat", fmt(fiat_type(fiat_decimal)) }, { "fiat_currency", fiat_currency } });
     }
 
     amount::value_type amount::get_fiat_cents(const std::string& fiat_str)
@@ -162,6 +160,13 @@ namespace sdk {
     std::string amount::format_amount(const std::string& value_str, size_t dp)
     {
         return fmt(conversion_type(value_str), dp);
+    }
+
+    amount::signed_value_type amount::signed_value() const
+    {
+        constexpr auto highbit = (((uint64_t)1) << ((uint64_t)63));
+        GDK_RUNTIME_ASSERT_MSG(!(m_value & highbit), "value out of range");
+        return static_cast<signed_value_type>(m_value);
     }
 
 } // namespace sdk

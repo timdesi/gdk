@@ -33,12 +33,17 @@ impl<'de> serde::Deserialize<'de> for MasterBlindingKey {
         use bitcoin::hashes::hex::FromHex;
         use std::convert::TryInto;
         let hex: String = serde::Deserialize::deserialize(deserializer)?;
-        let v = Vec::<u8>::from_hex(&hex).map_err(|e| {
+        let mut v = Vec::<u8>::from_hex(&hex).map_err(|e| {
             serde::de::Error::custom(format!("Master blinding key must be valid hex ({:?})", e))
         })?;
+        if v.len() == 32 {
+            // Handle both full and half-size blinding keys
+            v.splice(0..0, [0u8; 32]);
+        }
         Ok(MasterBlindingKey(
-            v.try_into()
-                .map_err(|_| serde::de::Error::custom("Master blinding key must be 64 bytes"))?,
+            v.try_into().map_err(|_| {
+                serde::de::Error::custom("Master blinding key must be 64 or 32 bytes")
+            })?,
         ))
     }
 }
@@ -89,6 +94,16 @@ pub fn bip39_mnemonic_to_seed(mnemonic: &str, passphrase: &str) -> Option<[u8; B
     assert_eq!(ret, ffi::WALLY_OK);
     assert_eq!(written, BIP39_SEED_BYTES);
     Some(out)
+}
+
+/// Generate a mnemonic sentence from the entropy
+pub fn bip39_mnemonic_from_entropy(entropy: &[u8]) -> String {
+    let mut out: *mut libc::c_char = std::ptr::null_mut();
+    let ret = unsafe {
+        ffi::bip39_mnemonic_from_bytes(ptr::null(), entropy.as_ptr(), entropy.len(), &mut out)
+    };
+    assert_eq!(ret, ffi::WALLY_OK);
+    read_str(out)
 }
 
 pub fn asset_blinding_key_from_seed(seed: &[u8]) -> MasterBlindingKey {
@@ -187,6 +202,13 @@ mod tests {
 
         let seed = bip39_mnemonic_to_seed(&v_mnem, &v_passphrase).unwrap();
         assert_eq!(v_seed, seed.to_hex());
+    }
+
+    #[test]
+    fn test_bip39_mnemonic_from_entropy() {
+        let entropy = [0u8; 16];
+        let mnemonic = bip39_mnemonic_from_entropy(&entropy);
+        assert_eq!("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about", &mnemonic);
     }
 
     #[test]

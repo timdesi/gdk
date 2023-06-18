@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -76,7 +77,7 @@ namespace sdk {
         nlohmann::json get_twofactor_config(locker_t& locker, bool reset_cached = false);
         std::vector<std::string> get_enabled_twofactor_methods();
 
-        nlohmann::json get_settings();
+        nlohmann::json get_settings() const;
         nlohmann::json get_post_login_data();
         void change_settings(const nlohmann::json& settings);
 
@@ -101,6 +102,7 @@ namespace sdk {
         nlohmann::json cancel_twofactor_reset(const nlohmann::json& twofactor_data);
 
         nlohmann::json encrypt_with_pin(const nlohmann::json& details);
+        nlohmann::json decrypt_with_pin(const nlohmann::json& details);
         void disable_all_pin_logins();
 
         nlohmann::json get_unspent_outputs(const nlohmann::json& details, unique_pubkeys_and_scripts_t& missing);
@@ -111,10 +113,7 @@ namespace sdk {
         wally_tx_ptr get_raw_transaction_details(const std::string& txhash_hex) const;
         nlohmann::json get_transaction_details(const std::string& txhash_hex) const;
 
-        nlohmann::json create_transaction(const nlohmann::json& details);
-        nlohmann::json user_sign_transaction(const nlohmann::json& details);
         nlohmann::json service_sign_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data);
-        nlohmann::json psbt_sign(const nlohmann::json& details);
         nlohmann::json send_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data);
         std::string broadcast_transaction(const std::string& tx_hex);
 
@@ -145,12 +144,10 @@ namespace sdk {
             uint32_t subtype, uint32_t script_type);
         void encache_new_scriptpubkeys(uint32_t subaccount);
         nlohmann::json get_scriptpubkey_data(byte_span_t scriptpubkey);
-        nlohmann::json psbt_get_details(const nlohmann::json& details);
 
         amount get_min_fee_rate() const;
         amount get_default_fee_rate() const;
         uint32_t get_block_height() const;
-        amount get_dust_threshold() const;
         nlohmann::json get_spending_limits() const;
         bool is_spending_limits_decrease(const nlohmann::json& details);
 
@@ -211,7 +208,7 @@ namespace sdk {
         nlohmann::json get_spending_limits(locker_t& locker) const;
         nlohmann::json convert_amount(locker_t& locker, const nlohmann::json& amount_json) const;
         nlohmann::json convert_fiat_cents(locker_t& locker, amount::value_type fiat_cents) const;
-        nlohmann::json get_settings(locker_t& locker);
+        nlohmann::json get_settings(locker_t& locker) const;
         bool unblind_utxo(locker_t& locker, nlohmann::json& utxo, const std::string& for_txhash,
             unique_pubkeys_and_scripts_t& missing);
         std::vector<unsigned char> get_alternate_blinding_nonce(
@@ -222,13 +219,14 @@ namespace sdk {
 
         std::unique_ptr<locker_t> get_multi_call_locker(uint32_t category_flags, bool wait_for_lock);
         void on_new_transaction(const std::vector<uint32_t>& subaccounts, nlohmann::json details);
+        void purge_tx_notification(const std::string& txhash_hex);
         void on_new_block(nlohmann::json details, bool is_relogin);
         void on_new_block(locker_t& locker, nlohmann::json details, bool is_relogin);
         void on_new_tickers(nlohmann::json details);
         void change_settings_pricing_source(locker_t& locker, const std::string& currency, const std::string& exchange);
 
         void remap_appearance_settings(session_impl::locker_t& locker, const nlohmann::json& src_json,
-            nlohmann::json& dst_json, bool from_settings);
+            nlohmann::json& dst_json, bool from_settings) const;
 
         nlohmann::json insert_subaccount(locker_t& locker, uint32_t subaccount, const std::string& name,
             const std::string& receiving_id, const std::string& recovery_pub_key,
@@ -249,6 +247,7 @@ namespace sdk {
         void subscribe_all(locker_t& locker);
 
         std::vector<unsigned char> get_pin_password(const std::string& pin, const std::string& pin_identifier);
+        nlohmann::json decrypt_with_pin_impl(const nlohmann::json& details, bool is_login);
 
         // Start/stop background header downloads
         void download_headers_ctl(locker_t& locker, bool do_start);
@@ -256,11 +255,11 @@ namespace sdk {
 
         const bool m_spv_enabled;
         nlohmann::json m_login_data;
-        boost::optional<pbkdf2_hmac512_t> m_local_encryption_key;
+        std::optional<pbkdf2_hmac512_t> m_local_encryption_key;
         client_blob m_blob;
         std::string m_blob_hmac;
-        boost::optional<pbkdf2_hmac256_t> m_blob_aes_key;
-        boost::optional<pbkdf2_hmac256_t> m_blob_hmac_key;
+        std::optional<pbkdf2_hmac256_t> m_blob_aes_key;
+        std::optional<pbkdf2_hmac256_t> m_blob_hmac_key;
         bool m_blob_outdated;
         std::array<uint32_t, 32> m_gait_path;
         nlohmann::json m_limits_data;

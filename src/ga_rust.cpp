@@ -6,14 +6,16 @@
 // ??
 #endif
 
-#include "../subprojects/gdk_rust/gdk_rust.h"
+#include "gdk_rust.h"
 
 #include "exception.hpp"
 #include "ga_rust.hpp"
 #include "ga_strings.hpp"
+#include "ga_tx.hpp"
 #include "logging.hpp"
 #include "session.hpp"
 #include "signer.hpp"
+#include "transaction_utils.hpp"
 #include "utils.hpp"
 #include "xpub_hdkey.hpp"
 
@@ -108,7 +110,9 @@ namespace sdk {
         const std::vector<uint32_t>& pointers, const std::vector<std::string>& bip32_xpubs)
     {
         // Note we only register each loaded subaccount once.
-        const nlohmann::json details({ { "name", std::string() } });
+        // Subaccount to register has already been created, so we
+        // set a flag to avoid the checks on the (sub)account gaps.
+        const nlohmann::json details({ { "name", std::string() }, { "is_already_created", true } });
         for (size_t i = 0; i < pointers.size(); ++i) {
             const auto pointer = pointers.at(i);
             if (!m_user_pubkeys->have_subaccount(pointer)) {
@@ -121,7 +125,8 @@ namespace sdk {
     nlohmann::json ga_rust::login(std::shared_ptr<signer> signer)
     {
         set_signer(signer);
-        return rust_call("login", signer->get_credentials(), m_session);
+        rust_call("login", signer->get_credentials(), m_session);
+        return get_post_login_data();
     }
     nlohmann::json ga_rust::credentials_from_pin_data(const nlohmann::json& pin_data)
     {
@@ -129,8 +134,8 @@ namespace sdk {
     }
     nlohmann::json ga_rust::login_wo(std::shared_ptr<signer> signer)
     {
-        throw std::runtime_error("login_wo not implemented");
-        __builtin_unreachable();
+        set_signer(signer);
+        return rust_call("login_wo", signer->get_credentials(), m_session);
     }
     bool ga_rust::set_wo_credentials(const std::string& username, const std::string& password)
     {
@@ -223,7 +228,9 @@ namespace sdk {
 
     nlohmann::json ga_rust::get_receive_address(const nlohmann::json& details)
     {
-        return rust_call("get_receive_address", details, m_session);
+        auto addr = rust_call("get_receive_address", details, m_session);
+        utxo_add_paths(*this, addr);
+        return addr;
     }
 
     nlohmann::json ga_rust::get_previous_addresses(const nlohmann::json& details)
@@ -282,14 +289,17 @@ namespace sdk {
             m_net_params.is_main_net(), m_net_params.is_liquid(), subaccount, pointer, is_internal);
     }
 
-    nlohmann::json ga_rust::get_subaccount_xpub(uint32_t subaccount)
-    {
-        return rust_call("get_subaccount_xpub", { { "subaccount", subaccount } }, m_session);
-    }
-
     nlohmann::json ga_rust::get_available_currencies() const
     {
-        return rust_call("get_available_currencies", nlohmann::json({}), m_session);
+        nlohmann::json p = nlohmann::json::object();
+        p["currency_url"] = m_net_params.get_price_url();
+
+        try {
+            return rust_call("get_available_currencies", p, m_session);
+        } catch (const std::exception& ex) {
+            GDK_LOG_SEV(log_level::error) << "error fetching currencies: " << ex.what();
+            return { { "error", ex.what() } };
+        }
     }
 
     bool ga_rust::is_rbf_enabled() const
@@ -302,12 +312,12 @@ namespace sdk {
     { /* TODO: Implement when watch only is implemented */
     }
 
-    nlohmann::json ga_rust::get_settings() { return rust_call("get_settings", nlohmann::json({}), m_session); }
+    nlohmann::json ga_rust::get_settings() const { return rust_call("get_settings", nlohmann::json({}), m_session); }
 
     nlohmann::json ga_rust::get_post_login_data()
     {
         auto master_xpub = get_nonnull_signer()->get_master_bip32_xpub();
-        return get_wallet_hash_id(
+        return get_wallet_hash_ids(
             { { "name", m_net_params.network() } }, { { "master_xpub", std::move(master_xpub) } });
     }
 
@@ -362,6 +372,11 @@ namespace sdk {
         return rust_call("encrypt_with_pin", details, m_session);
     }
 
+    nlohmann::json ga_rust::decrypt_with_pin(const nlohmann::json& details)
+    {
+        return rust_call("decrypt_with_pin", details, m_session);
+    }
+
     nlohmann::json ga_rust::get_unspent_outputs(
         const nlohmann::json& details, unique_pubkeys_and_scripts_t& /*missing*/)
     {
@@ -402,71 +417,30 @@ namespace sdk {
         }
     }
 
-    nlohmann::json ga_rust::create_transaction(const nlohmann::json& details)
-    {
-        GDK_LOG_SEV(log_level::debug) << "ga_rust::create_transaction:" << details.dump();
-        nlohmann::json result(details);
-
-        auto addressees_p = result.find("addressees");
-        if (addressees_p != result.end()) {
-            for (auto& addressee : *addressees_p) {
-                // TODO: unify handling with add_tx_addressee
-                nlohmann::json uri_params;
-                try {
-                    uri_params = parse_bitcoin_uri(addressee.at("address"), m_net_params.bip21_prefix());
-                } catch (const std::exception& e) {
-                    result["error"] = e.what();
-                    return result;
-                }
-                if (!uri_params.is_null()) {
-                    addressee["address"] = uri_params["address"];
-                    const auto& bip21_params = uri_params["bip21-params"];
-                    addressee["bip21-params"] = bip21_params;
-                    const auto uri_amount_p = bip21_params.find("amount");
-                    if (uri_amount_p != bip21_params.end()) {
-                        // Use the amount specified in the URI
-                        const nlohmann::json uri_amount = { { "btc", uri_amount_p->get<std::string>() } };
-                        addressee["satoshi"] = amount::convert(uri_amount, "", "")["satoshi"];
-                    }
-                    if (m_net_params.is_liquid()) {
-                        if (bip21_params.contains("amount") && !bip21_params.contains("assetid")) {
-                            result["error"] = res::id_invalid_payment_request_assetid;
-                            return result;
-                        } else if (bip21_params.contains("assetid")) {
-                            addressee["asset_id"] = bip21_params["assetid"];
-                        }
-                    }
-                }
-                if (!addressee.contains("satoshi")) {
-                    result["error"] = res::id_no_amount_specified;
-                    return result;
-                }
-            }
-        }
-        GDK_LOG_SEV(log_level::debug) << "ga_rust::create_transaction result: " << result.dump();
-
-        return rust_call("create_transaction", result, m_session);
-    }
-
-    nlohmann::json ga_rust::user_sign_transaction(const nlohmann::json& details)
-    {
-        return rust_call("sign_transaction", details, m_session);
-    }
-
     nlohmann::json ga_rust::service_sign_transaction(
         const nlohmann::json& details, const nlohmann::json& twofactor_data)
     {
         throw std::runtime_error("service_sign_transaction not implemented");
     }
 
-    nlohmann::json ga_rust::psbt_sign(const nlohmann::json& details)
+    nlohmann::json ga_rust::get_scriptpubkey_data(byte_span_t scriptpubkey)
     {
-        throw std::runtime_error("psbt_sign not implemented");
+        try {
+            return rust_call("get_scriptpubkey_data", nlohmann::json(b2h(scriptpubkey)), m_session);
+        } catch (const std::exception&) {
+            return nlohmann::json();
+        }
     }
 
-    nlohmann::json ga_rust::send_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data)
+    nlohmann::json ga_rust::send_transaction(const nlohmann::json& details, const nlohmann::json& /*twofactor_data*/)
     {
-        return rust_call("send_transaction", details, m_session);
+        auto txhash_hex = broadcast_transaction(details.at("transaction"));
+        auto result = details;
+        if (details.contains("memo")) {
+            set_transaction_memo(txhash_hex, details.at("memo"));
+        }
+        result["txhash"] = std::move(txhash_hex);
+        return result;
     }
 
     std::string ga_rust::broadcast_transaction(const std::string& tx_hex)
@@ -528,28 +502,36 @@ namespace sdk {
 
     nlohmann::json ga_rust::convert_amount(const nlohmann::json& amount_json) const
     {
-        auto currency = amount_json.value("fiat_currency", "USD");
-        auto fallback_rate = amount_json.value("fiat_rate", "");
-        auto currency_query = nlohmann::json({ { "currencies", currency } });
-        std::string fetched_rate = "";
-        try {
-            auto xrates = rust_call("exchange_rates", currency_query, m_session)["currencies"];
-            fetched_rate = xrates.value(currency, "");
-        } catch (const std::exception& ex) {
-            GDK_LOG_SEV(log_level::warning) << "cannot fetch exchange rate " << ex.what();
+        auto pricing = get_settings().value("pricing", nlohmann::json({ { "currency", "" }, { "exchange", "" } }));
+        std::string currency = amount_json.value("fiat_currency", pricing["currency"]);
+        std::string exchange = pricing["exchange"];
+
+        std::string fiat_rate;
+
+        if (!currency.empty() && !exchange.empty()) {
+            auto currency_query = nlohmann::json({ { "currencies", currency } });
+            currency_query["price_url"] = m_net_params.get_price_url();
+            currency_query["fallback_rate"] = amount_json.value("fiat_rate", "");
+            currency_query["exchange"] = exchange;
+
+            try {
+                auto xrates = rust_call("exchange_rates", currency_query, m_session)["currencies"];
+                fiat_rate = xrates.value(currency, "");
+            } catch (const std::exception& ex) {
+                GDK_LOG_SEV(log_level::warning) << "cannot fetch exchange rate " << ex.what();
+            }
         }
-        auto rate = fetched_rate.empty() ? fallback_rate : fetched_rate;
-        return amount::convert(amount_json, currency, rate);
+
+        return amount::convert(amount_json, currency, fiat_rate);
     }
 
-    amount ga_rust::get_min_fee_rate() const { return amount(m_net_params.is_liquid() ? 100 : 1000); }
+    amount ga_rust::get_min_fee_rate() const { return rust_call("get_min_fee_rate", {}, m_session); }
     amount ga_rust::get_default_fee_rate() const
     {
         // TODO: Implement using a user block default setting when we have one
         return get_min_fee_rate();
     }
     uint32_t ga_rust::get_block_height() const { return rust_call("get_block_height", {}, m_session); }
-    amount ga_rust::get_dust_threshold() const { return amount(546); }
 
     nlohmann::json ga_rust::get_spending_limits() const
     {
@@ -570,6 +552,11 @@ namespace sdk {
     }
 
     void ga_rust::disable_all_pin_logins() {}
+
+    nlohmann::json ga_rust::get_address_data(const nlohmann::json& details)
+    {
+        return rust_call("get_address_data", details, m_session);
+    }
 
 } // namespace sdk
 } // namespace ga

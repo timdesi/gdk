@@ -1,0 +1,38 @@
+#! /usr/bin/env bash
+set -e
+
+sqlite3=$<TARGET_PROPERTY:sqlite3,IMPORTED_LOCATION>
+gdk_rust=$<TARGET_FILE:gdk-rust>
+wally=@wallycore_LINK_LIBRARIES@
+secp256k1=@libsecp256k1_LINK_LIBRARIES@
+libevent=$<TARGET_FILE:event_static>
+eventpthreads=@_maybeLibeventPthreads@
+boost_log=@Boost_LIBRARY_DIRS@/libboost_log.a
+boost_chrono=@Boost_LIBRARY_DIRS@/libboost_chrono.a
+boost_date_time=@Boost_LIBRARY_DIRS@/libboost_date_time.a
+boost_system=@Boost_LIBRARY_DIRS@/libboost_system.a
+boost_thread=@Boost_LIBRARY_DIRS@/libboost_thread.a
+openssl_ssl=@OPENSSL_SSL_LIBRARY@
+openssl_crypto=@OPENSSL_CRYPTO_LIBRARY@
+zlib=@ZLIB_LIBRARIES@
+tor="@TOR_LINK_LIBRARIES@"
+bc_ur="@BCUR_LIBRARIES@"
+
+
+libraries="libgreenaddress-partial.a $gdk_rust $sqlite3 $wally $secp256k1 $libevent $eventpthreads $boost_log $boost_log $boost_chrono $boost_date_time $boost_system $boost_thread $openssl_ssl $openssl_crypto $zlib $tor $bc_ur"
+
+
+if [ "$(uname)" = "Darwin" ]; then
+    libtool -static -o $<TARGET_FILE:greenaddress-full> $libraries
+    exit 0
+fi
+
+echo "create $<TARGET_FILE_NAME:greenaddress-full>" > libgreenaddress.mri
+for lib in $libraries; do
+    if [ ! -d "$obj_dir" ]; then
+        echo "addlib $lib" >> libgreenaddress.mri
+    fi
+done
+echo "save" >> libgreenaddress.mri
+echo "end" >> libgreenaddress.mri
+ar -M < libgreenaddress.mri

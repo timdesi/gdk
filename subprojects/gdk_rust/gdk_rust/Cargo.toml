@@ -10,29 +10,23 @@ crate-type = ["staticlib"]
 
 
 [dependencies]
-rand = "0.7.3"
-gdk-electrum = { path = "../gdk_electrum", features = ["testing"] }
 gdk-common = { path = "../gdk_common" }
+gdk-electrum = { path = "../gdk_electrum", features = ["testing"] }
 gdk-registry = { path = "../gdk_registry" }
+libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
-libc = "0.2"
-log = "0.4.8"
-url = "1.7.2"
-ureq = { version = "2.4.0", features = ["json", "socks-proxy", "gzip", "brotli"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.8.6"
 
 [dev-dependencies]
+gdk-test = { path = "../gdk_test" }
 tempfile = "3.2.0"
-electrum-client = { version = "0.8.0", default-features = false, features = [ "proxy", "use-openssl" ] }
-bitcoin = { version = "0.27.0", features = [ "use-serde" ] }
-#elements = { version = "0.18", features = ["serde-feature"] }
-elements = { git = "https://github.com/ElementsProject/rust-elements", rev = "0edddf730ff8fd441d3af28bc600b8bc8a8df5a9", features = ["serde-feature"] }
+bitcoin = { version = "0.29", features = [ "serde" ] }
+elements = { version = "0.20", features = ["serde"] }
 # TODO: remove "legacy" feature when upgrading electrs binaries
-electrsd = { version = "0.17.0", features = [ "legacy", "trigger" ] }
-ureq = { version = "2.4.0", features = ["json", "socks-proxy", "gzip", "brotli"] }
-secp256k1-sys = "=0.4.1" # 0.4.2 has compatibility issues with secp256k1-zkp-sys v0.4.0
-env_logger = "0.9.0"
+electrsd = { version = "0.23.0", features = [ "legacy" ] }
+env_logger = "0.10.0"
+base64 = "0.13"

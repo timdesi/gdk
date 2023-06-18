@@ -118,7 +118,7 @@ To authenticate with a PIN:
 :pin: The PIN entered by the user to unlock the wallet.
 :pin_data: See :ref:`pin-data`.
 
-To authenticate a watch-only user:
+To authenticate a watch-only user (multisig only):
 
 .. code-block:: json
 
@@ -126,6 +126,25 @@ To authenticate a watch-only user:
       "username": "my_watch_only_username",
       "password": "my_watch_only_password"
    }
+
+To authenticate a watch-only wallet (singlesig and Bitcoin only):
+
+.. code-block:: json
+
+   {
+      "core_descriptors": ["pkh([00000000/44'/1'/0']tpubDC2Q4xK4XH72J7Lkp6kAvY2Q5x4cxrKgrevkZKC2FwWZ9A9qA5eY6kvv6QDHb6iJtByzoC5J8KZZ29T45CxFz2Gh6m6PQoFF3DqukrRGtj5/0/*"],
+   }
+
+Or alternatively:
+
+.. code-block:: json
+
+   {
+      "slip132_extended_pubkeys": ["tpubDC2Q4xK4XH72J7Lkp6kAvY2Q5x4cxrKgrevkZKC2FwWZ9A9qA5eY6kvv6QDHb6iJtByzoC5J8KZZ29T45CxFz2Gh6m6PQoFF3DqukrRGtj5"],
+   }
+
+The values to use for ``"core_descriptors"`` and ``"slip132_extended_pubkeys"`` can be
+obtained from `GA_get_subaccount`.
 
 .. _hw-device:
 
@@ -142,6 +161,7 @@ Describes the capabilities of an external signing device.
          "supports_ae_protocol": 0,
          "supports_arbitrary_scripts": true,
          "supports_host_unblinding": false,
+         "supports_external_blinding": false,
          "supports_liquid": 1,
          "supports_low_r": false,
       }
@@ -152,6 +172,8 @@ Describes the capabilities of an external signing device.
 :supports_low_r: True if the device can produce low-R ECDSA signatures.
 :supports_liquid: 0 if the device does not support Liquid, 1 otherwise.
 :supports_host_unblinding: True if the device supports returning the Liquid master blinding key.
+:supports_external_blinding: True if the device supports blinding and signing Liquid transactions
+    with outputs that are already blinded from another wallet (e.g. 2-step swaps).
 :supports_ae_protocol: See "ae_protocol_support_level" enum  in the gdk source for details.
 
 The default for any value not provided is false or 0.
@@ -202,6 +224,22 @@ Encrypt with PIN Result JSON
       "pin_data": "...",
    }
 
+:pin_data: See :ref:`pin-data`.
+
+
+.. _decrypt-with-pin-details:
+
+Decrypt with PIN JSON
+---------------------
+
+.. code-block:: json
+
+   {
+      "pin": "...",
+      "pin_data": "...",
+   }
+
+:pin: The PIN that protects the server provided key.
 :pin_data: See :ref:`pin-data`.
 
 
@@ -273,6 +311,19 @@ as the array elements of `GA_get_subaccounts`.
 :type: For multisig subaccounts, one of ``"2of2"``, ``"2of3"`` or ``"2of2_no_recovery"``.
     For singlesig subaccounts, one of ``"p2pkh"``, ``"p2wpkh"`` or ``"p2sh-p2wpkh"``.
 :bip44_discovered: Singlesig only. Whether or not this subaccount contains at least one transaction.
+:user_path: The BIP32 path for this subaccount.
+    This field is only returned by `GA_get_subaccount`.
+:core_descriptors: Singlesig only. The Bitcoin Core compatible output descriptors.
+    One for the external chain and one for internal chain (change),
+    for instance ``"sh(wpkh(tpubDC2Q4xK4XH72H18SiEV2A6HUwUPLhXiTEQXU35r4a41ZVrUv2cgKUMm2fsKTapi8DH4Y8ZVjy8TQtmyWMuH37kjw8fQGJahjWbuQoPm6qRF/0/*))"``
+    ``"sh(wpkh(tpubDC2Q4xK4XH72H18SiEV2A6HUwUPLhXiTEQXU35r4a41ZVrUv2cgKUMm2fsKTapi8DH4Y8ZVjy8TQtmyWMuH37kjw8fQGJahjWbuQoPm6qRF/1/*))"``
+    for a ``p2sh-p2wpkh`` subaccount.
+    This field is only returned by `GA_get_subaccount`.
+:slip132_extended_pubkey: Singlesig and Bitcoin only. The extended public key with modified version
+    as specified in SLIP-0132 (xpub, ypub, zpub, tpub, upub, vpub).
+    Use of this value is discouraged and this field might be removed in the future.
+    Callers should use descriptors instead.
+    This field is only returned by `GA_get_subaccount`.
 
 .. _subaccount-update:
 
@@ -316,32 +367,31 @@ Subaccounts list JSON
 Transaction list JSON
 ---------------------
 
+Describes a users transaction history returned by `GA_get_transactions`.
+
 .. code-block:: json
 
-    [
+  {
+    "transactions": [
       {
-        "addressees": [
-          ""
-        ],
-        "block_height": 0,
-        "calculated_fee_rate": 1004,
-        "can_cpfp": true,
+        "block_height": 2098691,
+        "can_cpfp": false,
         "can_rbf": false,
-        "created_at_ts": 1551280324000000,
-        "fee": 206,
+        "created_at_ts": 1633987189032056,
+        "fee": 207,
         "fee_rate": 1004,
         "inputs": [
           {
             "address": "",
-            "address_type": "p2wsh",
-            "addressee": "",
+            "address_type": "csv",
+            "is_internal": false,
             "is_output": false,
-            "is_relevant": false,
+            "is_relevant": true,
             "is_spent": true,
-            "pointer": 1640,
+            "pointer": 287,
             "pt_idx": 0,
-            "satoshi": 1834469,
-            "script_type": 14,
+            "satoshi": 27071081568,
+            "script_type": 15,
             "subaccount": 0,
             "subtype": 0
           }
@@ -349,47 +399,217 @@ Transaction list JSON
         "memo": "",
         "outputs": [
           {
-            "address": "2N3GFLkDKXZRNUqBdHN2SDdwFXrc5FKAJ3a",
-            "address_type": "p2wsh",
-            "addressee": "",
+            "address": "2MztTCrvpq73a8homScCo659VADSLEfR2FW",
+            "address_type": "csv",
+            "is_internal": false,
             "is_output": true,
             "is_relevant": true,
             "is_spent": false,
-            "pointer": 1,
+            "pointer": 288,
             "pt_idx": 0,
-            "satoshi": 200000,
-            "script_type": 14,
-            "subaccount": 4,
-            "subtype": 0
+            "satoshi": 26970081361,
+            "script_type": 15,
+            "subaccount": 0,
+            "subtype": 51840
           },
           {
-            "address": "2N8HdRzRsV8fF8jWroeX1Hd6CFTBvUuEZfJ",
-            "address_type": "p2wsh",
-            "addressee": "",
+            "address": "tb1qt0lenzqp8ay0ryehj7m3wwuds240mzhgdhqp4c",
+            "address_type": "",
+            "is_internal": false,
             "is_output": true,
             "is_relevant": false,
             "is_spent": false,
-            "pointer": 1657,
+            "pointer": 0,
             "pt_idx": 1,
-            "satoshi": 1634263,
-            "script_type": 14,
+            "satoshi": 101000000,
+            "script_type": 11,
             "subaccount": 0,
             "subtype": 0
           }
         ],
-        "rbf_optin": true,
-        "satoshi": 200000,
-        "server_signed": true,
-        "transaction_size": 370,
-        "transaction_vsize": 205,
-        "transaction_weight": 820,
-        "txhash": "fe50531d94fae597d9e209582a401e62b1f705ace93eca94fe2e42f187456e4a",
-        "type": "incoming",
-        "user_signed": true,
-        "vsize": 205,
-        "spv_verified": "disabled"
+        "rbf_optin": false,
+        "satoshi": {
+          "btc": -101000207
+        },
+        "spv_verified": "disabled",
+        "transaction_vsize": 206,
+        "transaction_weight": 824,
+        "txhash": "0a934eaa5c8a7c961c1c3aef51a49d11d7d9a04a839620ec6e796156b429c7b4",
+        "type": "outgoing"
       }
     ]
+  }
+
+
+:transactions: Top level container for the users transaction list.
+:block_height: The network block height that the transaction was confirmed
+    in, or ``0`` if the transaction is in the mempool.
+:can_cpfp: A boolean indicating whether the user can CPFP the transaction.
+:can_rbf: A boolean indicating whether the use can RBF (bump) the transaction fee.
+:created_at_ts: The timestamp in microseconds from the Unix epoc when the transaction
+    was seen by gdk or Green servers, or included in a block.
+:fee: The BTC or L-BTC network fee paid by the transaction in satoshi.
+:fee_rate: The fee rate in satoshi per thousand bytes.
+:inputs: See :ref:`tx-list-input`.
+:memo: The users memo, if previously set by `GA_set_transaction_memo`.
+:outputs: See :ref:`tx-list-output`.
+:rbf_optin: A boolean indicating whether the transaction is RBF-enabled.
+:satoshi: A map of asset names to the signed satoshi total for that asset in the
+    transaction. Negative numbers represent outgoing amounts, positive incoming.
+:spv_verified: The SPV status of the transaction, one of ``"in_progress"``, ``"verified"``,
+    ``"not_verified"``, ``"disabled"``, ``"not_longest"`` or ``"unconfirmed"``.
+:transaction_vsize: The size of the transaction in vbytes.
+:transaction_weight: The weight of the transaction.
+:txhash: The txid of the transaction.
+:type: One of ``"incoming"``, ``"outgoing"``, ``"mixed"`` or ``"not unblindable"``.
+
+
+.. _tx-list-input:
+
+Transaction list input element
+------------------------------
+
+Describes a transaction input in :ref:`tx-list`.
+
+.. code-block:: json
+
+  {
+    "address": "2MxVC4kQTpovRHiEmzd3q7vGtofM8CAijYY",
+    "address_type": "csv",
+    "is_internal": false,
+    "is_output": false,
+    "is_relevant": true,
+    "is_spent": true,
+    "pointer": 287,
+    "pt_idx": 0,
+    "satoshi": 27071081568,
+    "script_type": 15,
+    "subaccount": 0,
+    "subtype": 0
+  }
+
+
+:address: For user wallet addresses, the wallet address in base58, bech32 or blech32 encoding.
+:addressee: Optional, multisig only. For historical social payments, the account name sent from.
+:address_type: For user wallet addresses, One of ``"csv"``, ``"p2sh"``, ``"p2wsh"`` (multisig),
+    or ``"p2pkh"``, ``"p2sh-p2wpkh"``, ``"p2wpkh"`` (singlesig), indicating the type of address.
+:is_internal: Whether or not the user key belongs to the internal chain. Always false for multisig.
+:is_output: Always false. Deprecated, will be removed in a future release.
+:is_relevant: A boolean indicating whether the input relates to the subaccount the
+    caller passed to `GA_get_transactions`.
+:is_spent: Always true. Deprecated, will be removed in a future release.
+:pointer: For user wallet addresses, the address number/final number in the address derivation path.
+:pt_idx: Deprecated, will be removed in a future release.
+:satoshi: The amount of the input in satoshi.
+:script_type: Deprecated, will be removed in a future release.
+:subaccount: For user wallet addresses, the subaccount this output belongs to, or ``0``.
+:subtype: For ``"address_type"`` ``"csv"``, the number of CSV blocks used in the receiving scriptpubkey.
+
+Liquid inputs have additional fields:
+
+.. code-block:: json
+
+  {
+    "amountblinder": "3ad591ed6289ab0a7fa1777197f84a05cd12f651cca831932eaa8a09ac7cc7d2",
+    "asset_id": "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49",
+    "asset_tag": "0b5ff0a91c05353089cd40250a2b6c81f09507637d90c37c7e372a8465a4dc0458",
+    "assetblinder": "0cd232883f93a3376b88e19a17192495663315a94bd54a24f20299b9af7a696c",
+    "commitment": "09f9ac1dfa5042e25a9791fde4aa8292e21c25479eec7783ec5400805a227be256",
+    "is_blinded": true,
+    "nonce_commitment": "03dcec00304fe2debe04a57f84962966b92db9390b96e9931fef47b002fb265278",
+    "previdx": 1,
+    "prevpointer": 40,
+    "prevsubaccount": null,
+    "prevtxhash": "be5ad6db9598873b1443796aa0b34445aa85145586b3355324130c0fd869948f",
+    "script": "a914759262b6664d3be92ff41f3a06ade42fa429843087",
+  }
+
+
+:amountblinder: The hex-encoded amount blinder (value blinding factor, vbf).
+:asset_id: The hex-encoded asset id in display format.
+:asset_tag: The hex-encoded asset commitment.
+:assetblinder: The hex-encoded asset blinder (asset blinding factor, abf).
+:commitment: The hex-encoded value commitment.
+:is_blinded: A boolean indicating whether or not the input is blinded.
+:nonce_commitment: The hex-encoded nonce commitment.
+:previdx: The output index of the transaction containing the output representing this input.
+:prevpointer: Deprecated, will be removed in a future release.
+:prevsubaccount: Deprecated, will be removed in a future release.
+:prevtxhash: The txid of the transaction containing the output representing this input.
+:script: The scriptpubkey of the output representing this input.
+
+
+.. _tx-list-output:
+
+Transaction list output element
+-------------------------------
+
+Describes a transaction output in :ref:`tx-list`.
+
+.. code-block:: json
+
+  {
+    "address": "2MwdBCwyJnEtp2Bq8CBxyeSi5JWJQ9nXkjj",
+    "address_type": "p2wsh",
+    "is_internal": false,
+    "is_output": true,
+    "is_relevant": true,
+    "is_spent": true,
+    "pointer": 275,
+    "pt_idx": 0,
+    "satoshi": 1000,
+    "script_type": 14,
+    "subaccount": 0,
+    "subtype": 0
+  }
+
+:address: For user wallet addresses, the wallet address in base58, bech32 or blech32 encoding.
+:address_type: For user wallet output addresses, One of ``"csv"``, ``"p2sh"``, ``"p2wsh"`` (multisig),
+    or ``"p2pkh"``, ``"p2sh-p2wpkh"``, ``"p2wpkh"`` (singlesig), indicating the type of address.
+:is_internal: Whether or not the user key belongs to the internal chain. Always false for multisig.
+:is_output: Always true. Deprecated, will be removed in a future release.
+:is_relevant: A boolean indicating whether the output relates to the subaccount the
+    caller passed to `GA_get_transactions`.
+:is_spent: A boolean indicating if this output has been spent.
+:pointer: For user wallet addresses, the address number/final number in the address derivation path.
+:pt_idx: Deprecated, will be removed in a future release.
+:satoshi: The amount of the output in satoshi.
+:script_type: Deprecated, will be removed in a future release.
+:subaccount: For user wallet addresses, the subaccount this output belongs to, or ``0``.
+:subtype: For ``"address_type"`` ``"csv"``, the number of CSV blocks used in the receiving scriptpubkey.
+
+
+Liquid outputs have additional fields:
+
+.. code-block:: json
+
+  {
+    "amountblinder": "752defd24e9163917aea608a2ff8b77773311a4728551f49761781af9eb4905a",
+    "asset_id": "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5",
+    "asset_tag": "0ad82ac7489779a5303af3c30b1ec8abd47007f3d5ee01cb1f3b0aac2277a1df23",
+    "assetblinder": "d29b09a3f18c7b404ba99338f6427370d0a3b0f6b9591ecf54bce4623a93eb06",
+    "blinding_key": "039f2fd9daf37ae24e6a5311ffc18f60aaf3d8adac755c4ee93bf23bbde62071f7",
+    "commitment": "0920c8c8ffe7a3529d48947ee1102e3ffbaa62ffa941bc00544d4dd90767426f2d",
+    "is_blinded": true,
+    "is_confidential": true,
+    "nonce_commitment": "0389e67d84f9d04fd163ca540efa599fb51433e7891156c96321f9e85a2687b270",
+    "script": "a9144371b94845ee9b316fad126238ccefc05ae74ae587",
+    "unconfidential_address": "8ka5DahqHU82oALm372w9rPLZskn4jwpSu"
+  }
+
+:amountblinder: The hex-encoded amount blinder (value blinding factor, vbf).
+:asset_id: The hex-encoded asset id in display format.
+:asset_tag: The hex-encoded asset commitment.
+:assetblinder: The hex-encoded asset blinder (asset blinding factor, abf).
+:blinding_key: The blinding public key for the output.
+:commitment: The hex-encoded value commitment.
+:is_blinded: For user wallet outputs, a boolean indicating whether or not the output is blinded.
+:is_confidential: For user wallet outputs, always true when ``is_blinded`` is true.
+:nonce_commitment: The hex-encoded nonce commitment.
+:script: For user wallet outputs, the scriptpubkey of this output.
+:unconfidential_address: For user wallet outputs, the non-confidential address
+    corresponding to ``address``. This is provided for informational purposes
+    only and should not be used to receive.
 
 
 .. _external-tx-detail:
@@ -405,40 +625,12 @@ users wallet. Returned by `GA_get_transaction_details`.
   {
     "transaction": "02000000000101ab0dec345ed48b0761411306eae50f90dd34f3c8598e48f1c3ad324a862bc72b0000000000feffffff02f4958b4400000000160014a0573f94da51090f3225ddccab864bf3add1019300e1f5050000000017a914fda46ba3f2fc040df40d8cb8543b3dcdc168b6fa870247304402201420ca8bb17c74eef87d7c26a1bed69ddaec8f389df06f3d0233edf0070eec69022051e7bf1efb00a198a5c9958811246f19a1071ac6b68fa9c2f3d91d7a080a56fa012102be66aba37c4c48c85b6eea4d0d7c6ba0e22803438d3f1e29bc8e6e352786335fb0010000",
     "transaction_locktime": 432,
-    "transaction_size": 223,
     "transaction_version": 2,
     "transaction_vsize": 142,
     "transaction_weight": 565,
     "txhash": "dc5c908a6c979211e6482766adb69cbcbe760c92923671f6304d12a3f462a2b0"
   }
 
-
-.. _create-tx-details:
-
-Create transaction JSON
------------------------
-
-.. code-block:: json
-
- {
-  "addressees": [
-    {
-      "address": "bitcoin:2NFHMw7GbqnQ3kTYMrA7MnHiYDyLy4EQH6b?amount=0.001"
-    }
-  ],
-  "subaccount": 0
- }
-
- {
-  "addressees": [
-    {
-      "address": "2NFHMw7GbqnQ3kTYMrA7MnHiYDyLy4EQH6b",
-      "satoshi": 100000
-    }
-  ],
-  "subaccount": 0,
-  "fee_rate": 1000
- }
 
 .. _sign-tx-details:
 
@@ -450,116 +642,117 @@ Sign transaction JSON
   {
   "addressees": [
     {
-      "address": "2MtcMpWnde3tf5vfwnHXKBaWuAUS8j89771",
-      "bip21-params": null,
-      "satoshi": 100000
+      "address": "2N5xpcfb1TCjncrKABhw2LWPKTSdzVYSy3A",
+      "satoshi": 5000
     }
   ],
   "addressees_read_only": false,
   "amount_read_only": false,
-  "available_total": 4999794,
+  "available_total": 50000,
   "calculated_fee_rate": 1000,
   "change_address": {
-    "address": "2NAvvWUygud1YSdsqTZbnntMRjsbx4RxP3Z",
-    "address_type": "p2wsh",
-    "branch": 1,
-    "pointer": 492,
-    "script": "522102da0e5f74219dadbd392dc3157c43c3636e237005e7f3976a338e519901fdf9e32103326c44e51893994677bb43e5d272af11aea967a4ca3f1c431fe41e6a7851a35152ae",
-    "script_type": 14,
-    "service_xpub": "tpubEAUTpVqYYmDxumXSPwZEgCRC5HZXagbsATdv3wUMweyDrJY4fVDt89ogtpBxa9ynpXB3AyGen3Ko4S8ewpWkkvQsvYP86oEc8z9B6crQ5gn",
-    "subaccount": 0,
-    "subtype": null,
-    "user_path": [
-      1,
-      492
-    ]
+    "btc": {
+      "address": "2N7M3gisUPGmZBeU4WnV9UNkJ9zW2n8bEW7",
+      "address_type": "csv",
+      "branch": 1,
+      "pointer": 3,
+      "script": "2103bff5afb55b115068c2f5d906fc97a41ec3b81446f616a31d2304d2cf18c87db9ad2103eaf7e8cf60e89cfb9fe8cabf141b041b0eb6ade361f9ec84943445bd0abdfe29ac73640380ca00b268",
+      "script_type": 15,
+      "service_xpub": "tpubEAUTpVqYYmSyPnSwSTWrdahLK22WRUkFK66kH348bRawwcBDegdUaucPGU28qS1z9ZiMjH7N2Qqc6HPJiQvekLS8GCpHHCxZfmNpF798ECb",
+      "subaccount": 0,
+      "subtype": 51840,
+      "user_path": [
+        1,
+        3
+      ]
+    }
   },
-  "change_amount": 4889588,
-  "change_index": 0,
+  "change_amount": {
+    "btc": 44792
+  },
+  "change_index": {
+    "btc": 0
+  },
   "change_subaccount": 0,
   "error": "",
-  "fee": 206,
+  "fee": 208,
   "fee_rate": 1000,
-  "have_change": true,
   "is_redeposit": false,
   "is_sweep": false,
   "network_fee": 0,
   "satoshi": {
-    "btc": 100000
+    "btc": 5000
   },
   "send_all": false,
-  "server_signed": false,
-  "subaccount": 0,
-  "transaction": "02000000000101c01365291a12d995d7afc3234f4e86d3e064f175ab5a7d47e631de7f293a930901000000230000000000000000000000000000000000000000000000000000000000000000000000fdffffff02f49b4a000000000017a914c1fc2f90044f58698bf9c51f3283e25c809ac17d87a08601000000000017a9140ef7660003133f69023f0436dc8bcf427941dcf5870400480000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000047522103bad7ac76143368781c4ac3e7afbb63cd6b52f2a923c715576804aa1046cabc1a210264f5fa70969907861ebdb2b2d53beb125523bb5140b90194481e2415ade1787452ae4ca21600",
-  "transaction_locktime": 1483340,
+  "transaction": "0200000000010135d2bb82963e54a9060567b101760530797590d2b4a636606c4f1e6ac62bed4300000000230000000000000000000000000000000000000000000000000000000000000000000000fdffffff02f8ae00000000000017a9149aaba80ae1e733f8fb4034abcb6bd835608a5c9e87881300000000000017a9148b7f781fc9425ffaeafcd4973d3ae1dc9a09d02b87040048000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000480000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004e210375d1b5be6c3f60759fd594b27a05459095ce0f371372d2f0297691c39357a60aad2102129801c6d879b59f27472ba1ac3e8b20dd1693885ad0e9640827a4bd475dfeafac73640380ca00b268c9000000",
+  "transaction_locktime": 201,
   "transaction_outputs": [
     {
-      "address": "2NAvvWUygud1YSdsqTZbnntMRjsbx4RxP3Z",
-      "address_type": "p2wsh",
+      "address": "2N7M3gisUPGmZBeU4WnV9UNkJ9zW2n8bEW7",
+      "address_type": "csv",
+      "asset_id": "btc",
       "branch": 1,
       "is_change": true,
-      "pointer": 492,
-      "satoshi": 4889588,
-      "script": "a914c1fc2f90044f58698bf9c51f3283e25c809ac17d87",
-      "script_type": 14,
-      "service_xpub": "tpubEAUTpVqYYmDxumXSPwZEgCRC5HZXagbsATdv3wUMweyDrJY4fVDt89ogtpBxa9ynpXB3AyGen3Ko4S8ewpWkkvQsvYP86oEc8z9B6crQ5gn",
+      "is_fee": false,
+      "pointer": 3,
+      "satoshi": 44792,
+      "scriptpubkey": "a9149aaba80ae1e733f8fb4034abcb6bd835608a5c9e87",
+      "script_type": 15,
+      "service_xpub": "tpubEAUTpVqYYmSyPnSwSTWrdahLK22WRUkFK66kH348bRawwcBDegdUaucPGU28qS1z9ZiMjH7N2Qqc6HPJiQvekLS8GCpHHCxZfmNpF798ECb",
       "subaccount": 0,
-      "subtype": null,
+      "subtype": 51840,
       "user_path": [
         1,
-        492
+        3
       ]
     },
     {
-      "address": "2MtcMpWnde3tf5vfwnHXKBaWuAUS8j89771",
+      "address": "2N5xpcfb1TCjncrKABhw2LWPKTSdzVYSy3A",
+      "asset_id": "btc",
       "is_change": false,
-      "satoshi": 100000,
-      "script": "a9140ef7660003133f69023f0436dc8bcf427941dcf587"
+      "is_fee": false,
+      "satoshi": 5000,
+      "script": "a9148b7f781fc9425ffaeafcd4973d3ae1dc9a09d02b87"
     }
   ],
-  "transaction_size": 372,
   "transaction_version": 2,
-  "transaction_vsize": 206,
-  "transaction_weight": 822,
+  "transaction_vsize": 208,
+  "transaction_weight": 829,
   "used_utxos": [
-    0
-  ],
-  "user_signed": false,
-  "utxo_strategy": "default",
-  "utxos": [
     {
-      "address_type": "p2wsh",
-      "block_height": 1448369,
-      "pointer": 475,
-      "prevout_script": "522103bad7ac76143368781c4ac3e7afbb63cd6b52f2a923c715576804aa1046cabc1a210264f5fa70969907861ebdb2b2d53beb125523bb5140b90194481e2415ade1787452ae",
-      "pt_idx": 1,
-      "satoshi": 4989794,
-      "script_type": 14,
+      "address_type": "csv",
+      "block_height": 201,
+      "expiry_height": 52041,
+      "is_internal": false,
+      "pointer": 1,
+      "prevout_script": "210375d1b5be6c3f60759fd594b27a05459095ce0f371372d2f0297691c39357a60aad2102129801c6d879b59f27472ba1ac3e8b20dd1693885ad0e9640827a4bd475dfeafac73640380ca00b268",
+      "pt_idx": 0,
+      "satoshi": 50000,
+      "script_type": 15,
       "sequence": 4294967293,
-      "service_xpub": "tpubEAUTpVqYYmDxumXSPwZEgCRC5HZXagbsATdv3wUMweyDrJY4fVDt89ogtpBxa9ynpXB3AyGen3Ko4S8ewpWkkvQsvYP86oEc8z9B6crQ5gn",
+      "service_xpub": "tpubEAUTpVqYYmSyPnSwSTWrdahLK22WRUkFK66kH348bRawwcBDegdUaucPGU28qS1z9ZiMjH7N2Qqc6HPJiQvekLS8GCpHHCxZfmNpF798ECb",
       "subaccount": 0,
-      "subtype": 0,
-      "txhash": "09933a297fde31e6477d5aab75f164e0d3864e4f23c3afd795d9121a296513c0",
+      "subtype": 51840,
+      "txhash": "43ed2bc66a1e4f6c6036a6b4d290757930057601b1670506a9543e9682bbd235",
       "user_path": [
         1,
-        475
-      ]
-    },
-    {
-      "address_type": "p2wsh",
-      "block_height": 1448369,
-      "pointer": 474,
-      "pt_idx": 0,
-      "satoshi": 10000,
-      "script_type": 14,
-      "subaccount": 0,
-      "subtype": 0,
-      "txhash": "09933a297fde31e6477d5aab75f164e0d3864e4f23c3afd795d9121a296513c0"
+        1
+      ],
+      "user_sighash": 1,
+      "skip_signing": false,
+      "user_status": 0
     }
   ],
-  "memo": ""
+  "utxo_strategy": "default",
   }
 
+
+To sign with a specific sighash, set ``"user_sighash"`` for the elements of
+``"used_utxos"`` you wish to sign with a certain sighash, otherwise
+``SIGHASH_ALL`` (``1``) will be used.
+
+Set ``"skip_signing"`` to ``true`` for any input in ``"used_utxos"`` you do
+not wish to have signed.
 
 
 .. _send-tx-details:
@@ -572,133 +765,171 @@ Send transaction JSON
   {
   "addressees": [
     {
-      "address": "2NDwUefHRbbHuGsumAWMbRZUzigrtBYkwrq",
-      "bip21-params": null,
-      "satoshi": 100000
+      "address": "2N5xpcfb1TCjncrKABhw2LWPKTSdzVYSy3A",
+      "satoshi": 5000
     }
   ],
   "addressees_read_only": false,
   "amount_read_only": false,
-  "available_total": 4999588,
-  "calculated_fee_rate": 1281,
+  "available_total": 50000,
+  "is_blinded": true,
+  "calculated_fee_rate": 1230,
   "change_address": {
-    "address": "2Mtpg961bP6WH9cQvY2qS4rnuceoRBrnutn",
-    "address_type": "p2wsh",
-    "branch": 1,
-    "pointer": 497,
-    "script": "52210350683b20cc33983f818c9b50606909622dbc4387a17699e5ae09b9d5d1b3111c21028598a36a99fbda64ff1d942afef40b1ad80050c2f8d7191f2ac302a58d9db40252ae",
-    "script_type": 14,
-    "service_xpub": "tpubEAUTpVqYYmDxumXSPwZEgCRC5HZXagbsATdv3wUMweyDrJY4fVDt89ogtpBxa9ynpXB3AyGen3Ko4S8ewpWkkvQsvYP86oEc8z9B6crQ5gn",
-    "subaccount": 0,
-    "subtype": null,
-    "user_path": [
-      1,
-      497
-    ]
+    "btc": {
+      "address": "2N7M3gisUPGmZBeU4WnV9UNkJ9zW2n8bEW7",
+      "address_type": "csv",
+      "branch": 1,
+      "pointer": 3,
+      "script": "2103bff5afb55b115068c2f5d906fc97a41ec3b81446f616a31d2304d2cf18c87db9ad2103eaf7e8cf60e89cfb9fe8cabf141b041b0eb6ade361f9ec84943445bd0abdfe29ac73640380ca00b268",
+      "script_type": 15,
+      "service_xpub": "tpubEAUTpVqYYmSyPnSwSTWrdahLK22WRUkFK66kH348bRawwcBDegdUaucPGU28qS1z9ZiMjH7N2Qqc6HPJiQvekLS8GCpHHCxZfmNpF798ECb",
+      "subaccount": 0,
+      "subtype": 51840,
+      "user_path": [
+        1,
+        3
+      ]
+    }
   },
-  "change_amount": 109663,
-  "change_index": 1,
+  "change_amount": {
+    "btc": 44792
+  },
+  "change_index": {
+    "btc": 0
+  },
   "change_subaccount": 0,
   "error": "",
-  "fee": 337,
+  "fee": 208,
   "fee_rate": 1000,
-  "have_change": true,
   "is_redeposit": false,
   "is_sweep": false,
-  "memo": "",
   "network_fee": 0,
-  "satoshi": 100000,
+  "satoshi": {
+    "btc": 5000
+  },
   "send_all": false,
-  "server_signed": false,
-  "subaccount": 0,
-  "transaction": "020000000001027ff3490a29a2fe73f07e3d3f8740249d61c0025fdc0819586dd9443bc6a00bd30100000023220020ed1761c2b0035dd221ec0f7f78ad88b44f7575884daa668def774bf4db97696afdffffffc01365291a12d995d7afc3234f4e86d3e064f175ab5a7d47e631de7f293a9309000000002322002012ba0847af1dcfb9a3d112224d6ed60f361cfdce243f98867aa85836f84bf808fdffffff02a08601000000000017a914e2ff64a1ca976947d47b6b2d214af96d5942e1b2875fac01000000000017a914114baed477ca8fb65f856b96f860acc52619a6fc870147304402200333910d9c37f5749298dbf8017e4f9932df2e727eeae907e65e102d267045e40220636500d1db9d92b7ff9f1fe1662d9445acfc322d19575ca1aefc98de9b37967a01014730440220731c09346ddff84673c7eeb64003339bc86a03eee04f49f6f1730884e2a772b002207e6a88797e9e0a76b0d85f55a1de52fcc70f80b9647028cca68b7790c83a6bd5014ea21600",
-  "transaction_locktime": 1483342,
+  "transaction": "0200000000010135d2bb82963e54a9060567b101760530797590d2b4a636606c4f1e6ac62bed430000000023220020babaa86eeaec7ae0f438218b993c7518e81efe6c8c64e9500648f861ccd590b3fdffffff02f8ae00000000000017a9149aaba80ae1e733f8fb4034abcb6bd835608a5c9e87881300000000000017a9148b7f781fc9425ffaeafcd4973d3ae1dc9a09d02b870147304402206aa051d8f6b373e9e73ea91967d3d574262a56f66b134804133893bc8b6a797f022069802eccea8174daadee65a6288f23434ed646d328bf184060e2517bd9c5aa3801c9000000",
+  "transaction_locktime": 201,
   "transaction_outputs": [
     {
-      "address": "2NDwUefHRbbHuGsumAWMbRZUzigrtBYkwrq",
-      "is_change": false,
-      "satoshi": 100000,
-      "script": "a914e2ff64a1ca976947d47b6b2d214af96d5942e1b287"
-    },
-    {
-      "address": "2Mtpg961bP6WH9cQvY2qS4rnuceoRBrnutn",
-      "address_type": "p2wsh",
+      "address": "2N7M3gisUPGmZBeU4WnV9UNkJ9zW2n8bEW7",
+      "address_type": "csv",
+      "asset_id": "btc",
       "branch": 1,
       "is_change": true,
-      "pointer": 497,
-      "satoshi": 109663,
-      "script": "a914114baed477ca8fb65f856b96f860acc52619a6fc87",
-      "script_type": 14,
-      "service_xpub": "tpubEAUTpVqYYmDxumXSPwZEgCRC5HZXagbsATdv3wUMweyDrJY4fVDt89ogtpBxa9ynpXB3AyGen3Ko4S8ewpWkkvQsvYP86oEc8z9B6crQ5gn",
+      "is_fee": false,
+      "pointer": 3,
+      "satoshi": 44792,
+      "scriptpubkey": "a9149aaba80ae1e733f8fb4034abcb6bd835608a5c9e87",
+      "script_type": 15,
+      "service_xpub": "tpubEAUTpVqYYmSyPnSwSTWrdahLK22WRUkFK66kH348bRawwcBDegdUaucPGU28qS1z9ZiMjH7N2Qqc6HPJiQvekLS8GCpHHCxZfmNpF798ECb",
       "subaccount": 0,
-      "subtype": null,
+      "subtype": 51840,
       "user_path": [
         1,
-        497
+        3
       ]
+    },
+    {
+      "address": "2N5xpcfb1TCjncrKABhw2LWPKTSdzVYSy3A",
+      "asset_id": "btc",
+      "is_change": false,
+      "is_fee": false,
+      "satoshi": 5000,
+      "script": "a9148b7f781fc9425ffaeafcd4973d3ae1dc9a09d02b87"
     }
   ],
-  "transaction_size": 374,
   "transaction_version": 2,
-  "transaction_vsize": 263,
-  "transaction_weight": 1052,
+  "transaction_vsize": 169,
+  "transaction_weight": 675,
   "used_utxos": [
-    1,
-    0
-  ],
-  "user_signed": true,
-  "utxo_strategy": "default",
-  "utxos": [
     {
-      "address_type": "p2wsh",
-      "block_height": 1448369,
-      "pointer": 474,
-      "prevout_script": "522102ff54a17dc6efe168673dbf679fe97e06b5cdcaf7dea8ab83dc6732350cd1b4e4210279979574e0743b4659093c005256c812f68f512c50d7d1622650b891de2cd61e52ae",
+      "address_type": "csv",
+      "block_height": 201,
+      "expiry_height": 52041,
+      "is_internal": false,
+      "pointer": 1,
+      "prevout_script": "210375d1b5be6c3f60759fd594b27a05459095ce0f371372d2f0297691c39357a60aad2102129801c6d879b59f27472ba1ac3e8b20dd1693885ad0e9640827a4bd475dfeafac73640380ca00b268",
       "pt_idx": 0,
-      "satoshi": 10000,
-      "script_type": 14,
+      "satoshi": 50000,
+      "script_type": 15,
       "sequence": 4294967293,
-      "service_xpub": "tpubEAUTpVqYYmDxumXSPwZEgCRC5HZXagbsATdv3wUMweyDrJY4fVDt89ogtpBxa9ynpXB3AyGen3Ko4S8ewpWkkvQsvYP86oEc8z9B6crQ5gn",
+      "service_xpub": "tpubEAUTpVqYYmSyPnSwSTWrdahLK22WRUkFK66kH348bRawwcBDegdUaucPGU28qS1z9ZiMjH7N2Qqc6HPJiQvekLS8GCpHHCxZfmNpF798ECb",
       "subaccount": 0,
-      "subtype": 0,
-      "txhash": "09933a297fde31e6477d5aab75f164e0d3864e4f23c3afd795d9121a296513c0",
+      "subtype": 51840,
+      "txhash": "43ed2bc66a1e4f6c6036a6b4d290757930057601b1670506a9543e9682bbd235",
       "user_path": [
         1,
-        474
-      ]
-    },
-    {
-      "address_type": "p2wsh",
-      "block_height": 0,
-      "pointer": 493,
-      "prevout_script": "522102c9465e8b6e98848428b90f21291a19c62fcb20d2dbff76217068219cada5f7a921022e831b15a4faa339ed9a09a6f1bc01da9001f86130e010a397603b4b4230a22552ae",
-      "pt_idx": 1,
-      "satoshi": 200000,
-      "script_type": 14,
-      "sequence": 4294967293,
-      "service_xpub": "tpubEAUTpVqYYmDxumXSPwZEgCRC5HZXagbsATdv3wUMweyDrJY4fVDt89ogtpBxa9ynpXB3AyGen3Ko4S8ewpWkkvQsvYP86oEc8z9B6crQ5gn",
-      "subaccount": 0,
-      "subtype": 0,
-      "txhash": "d30ba0c63b44d96d581908dc5f02c0619d2440873f3d7ef073fea2290a49f37f",
-      "user_path": [
-        1,
-        493
-      ]
-    },
-    {
-      "address_type": "p2wsh",
-      "block_height": 0,
-      "pointer": 494,
-      "pt_idx": 0,
-      "satoshi": 4789588,
-      "script_type": 14,
-      "subaccount": 0,
-      "subtype": 0,
-      "txhash": "d30ba0c63b44d96d581908dc5f02c0619d2440873f3d7ef073fea2290a49f37f"
+        1
+      ],
+      "user_status": 0
     }
-  ]
+  ],
+  "utxo_strategy": "default",
   }
 
+.. _create-swap-tx-details:
+
+Create Swap Transaction JSON
+----------------------------
+
+Describes the swap to be created when calling `GA_create_swap_transaction`.
+
+.. code-block:: json
+
+  {
+    "swap_type": "liquidex",
+    "input_type": "liquidex_v1",
+    "liquidex_v1": {},
+    "output_type": "liquidex_v1"
+  }
+
+:swap_type: Pass ``"liquidex"`` to create the maker's side of a LiquiDEX 2-step swap.
+:input_type: Pass ``"liquidex_v1"`` to pass LiquiDEX version 1 details.
+:liquidex_v1: The LiquiDEX v1 specific parameters, see :ref:`liquidex-v1-create-details`.
+              This field must included only if ``"input_type"`` is ``"liquidex_v1"``.
+:output_type: Pass ``"liquidex_v1"`` to return LiquiDEX proposal JSON version 1.
+
+.. _create-swap-tx-result:
+
+Create Swap Transaction Result JSON
+-----------------------------------
+
+If the ``"output_type"`` was ``"liquidex_v1"`` this field is `liquidex-v1-create-result`.
+
+
+.. _complete-swap-tx-details:
+
+Complete Swap Transaction JSON
+------------------------------
+
+Describes the swap to be completed when calling `GA_complete_swap_transaction`.
+
+.. code-block:: json
+
+  {
+    "swap_type": "liquidex",
+    "input_type": "liquidex_v1",
+    "liquidex_v1": {},
+    "output_type": "transaction",
+    "utxos": {},
+  }
+
+:swap_type: Pass ``"liquidex"`` to complete the taker's side of a LiquiDEX 2-step swap.
+:input_type: Pass ``"liquidex_v1"`` to pass a LiquiDEX proposal JSON version 1.
+:liquidex_v1: The LiquiDEX v1 specific parameters, see :ref:`liquidex-v1-complete-details`.
+              This field must included only if ``"input_type"`` is ``"liquidex_v1"``.
+:output_type: Pass ``"transaction"`` to return a transaction JSON that can be passed to `GA_sign_transaction`.
+:utxos: Mandatory. The UTXOs to fund the transaction with, :ref:`unspent-outputs` as returned by `GA_get_unspent_outputs`.
+        Note that coin selection is not performed on the passed UTXOs.
+        All passed UTXOs of the same asset as the receiving asset id will be included in the transaction.
+
+.. _complete-swap-tx-result:
+
+Complete Swap Transaction Result JSON
+-------------------------------------
+
+If the ``"output_type"`` was ``"transaction"`` this field is :ref:`sign-tx-details`.
 
 
 .. _sign-psbt-details:
@@ -715,7 +946,7 @@ Sign PSBT JSON
   }
 
 :psbt: The PSBT or PSET encoded in base64 format.
-:utxos: The UTXOs that should be signed, in the format returned by `GA_get_unspent_outputs`.
+:utxos: Mandatory. The UTXOs that should be signed, :ref:`unspent-outputs` as returned by `GA_get_unspent_outputs`.
         UTXOs that are not inputs of the PSBT/PSET can be included.
         Caller can avoid signing an input by not passing in its UTXO.
 :blinding_nonces: For ``"2of2_no_recovery"`` subaccounts only, the blinding nonces in hex format for all outputs.
@@ -751,7 +982,7 @@ PSBT Get Details JSON
   }
 
 :psbt: The PSBT or PSET encoded in base64 format.
-:utxos: The UTXOs owned by the wallet, in the format returned by `GA_get_unspent_outputs`.
+:utxos: Mandatory. The UTXOs owned by the wallet, :ref:`unspent-outputs` as returned by `GA_get_unspent_outputs`.
         UTXOs that are not inputs of the PSBT/PSET can be included.
 
 
@@ -780,6 +1011,41 @@ PSBT Get Details Result JSON
   }
 
 .. note:: Inputs and outputs might have additional fields that might be removed or changed in following releases.
+
+
+.. _sign-message-request:
+
+Sign Message JSON
+-----------------
+
+Describes a request for the wallet to sign a given message via `GA_sign_message`.
+
+.. code-block:: json
+
+  {
+    "address": "...",
+    "message": "..."
+  }
+
+:address: The address to use for the private key.
+    Must be a P2PKH address, and the address must belong to the wallet.
+:message: The message to sign.
+
+
+.. _sign-message-result:
+
+Sign Message Result JSON
+------------------------
+
+Returned by `GA_sign_message`.
+
+.. code-block:: json
+
+  {
+    "signature": "..."
+  }
+
+:message: The recoverable signature of the message encoded in base 64.
 
 
 .. _estimates:
@@ -850,10 +1116,98 @@ Describes the wallets enabled two factor methods, current spending limits, and t
   }
  }
 
+
+When the user has a fiat spending limit set instead of BTC, limits are returned as e.g:
+
+.. code-block:: json
+
+  "limits": {
+    "fiat": "0.01",
+    "fiat_currency": "EUR",
+    "is_fiat": true
+  }
+
 :twofactor_reset/days_remaining: The number of days remaining before the wallets two factor
                                  authentication is reset, or -1 if no reset procedure is underway.
 :twofactor_reset/is_active: Whether or not the wallet is currently undergoing the two factor reset procedure.
 :twofactor_reset/is_disputed: Whether or not the wallet two factor reset procedure is disputed.
+
+
+.. _bcur-encode:
+
+BCUR Encode JSON
+----------------
+
+Contains CBOR data to encode into UR format using `GA_bcur_encode`.
+
+.. code-block:: json
+
+ {
+    "ur_type": "crypto-seed",
+    "data": "A20150C7098580125E2AB0981253468B2DBC5202D8641947DA",
+    "max_fragment_len": 100
+ }
+
+:ur_type: The type of the CBOR-encoded data.
+:data: CBOR-encoded data in hexadecimal format.
+:max_fragment_len: The maximum size of each UR-encoded fragment to return.
+
+Where ``data`` is longer than ``max_fragment_len``, the result is a multi-part
+encoding using approximately 3 times the minimum number of fragments needed to
+decode the data, split into parts of size ``max_fragment_len`` or less.
+
+In this case, the caller must provide all retrned parts to any decoder, e.g. by
+generating an animated QR code from them.
+
+.. _bcur-encoded:
+
+BCUR Encoded fragments JSON
+---------------------------
+
+Contains UR format data encoded using `GA_bcur_encode`.
+
+.. code-block:: json
+
+ {
+    "parts": ["ur:crypto-seed/oeadgdstaslplabghydrpfmkbggufgludprfgmaotpiecffltnlpqdenos"]
+ }
+
+:parts: The resulting array of UR-encoded fragments representing the input CBOR.
+
+
+.. _bcur-decode:
+
+BCUR Decode JSON
+----------------
+
+Contains UR encoded data to decode into CBOR using `GA_bcur_decode`.
+
+.. code-block:: json
+
+ {
+    "part": "ur:crypto-seed/oeadgdstaslplabghydrpfmkbggufgludprfgmaotpiecffltnlpqdenos"
+ }
+
+:part: The UR-encoded string for an individual part. For multi-part decoding, the
+    parts can be provided in any order.
+
+
+.. _bcur-decoded:
+
+BCUR Decoded data JSON
+----------------------
+
+Contains CBOR data decoded from UR format using `GA_bcur_decode`.
+
+.. code-block:: json
+
+ {
+    "ur_type": "crypto-seed",
+    "data": "A20150C7098580125E2AB0981253468B2DBC5202D8641947DA"
+ }
+
+:ur-type: The type of the decoded data as specified when it was encoded.
+:data: The resulting CBOR-encoded data in hexadecimal format.
 
 
 .. _settings:
@@ -869,7 +1223,8 @@ Settings JSON
     "nlocktime": 12960,
     "notifications": {
       "email_incoming": true,
-      "email_outgoing": true
+      "email_outgoing": true,
+      "email_login": true
     },
     "pgp": "",
     "pricing": {
@@ -920,13 +1275,14 @@ For Liquid addresses, the following additional fields are returned:
     "blinding_key": "02a519491b130082a1abbe17395213b46dae43c3e1c05b7a3dbd2157bd83e88a6e",
     "blinding_script": "a914c2427b28b2796243e1e8ee65be7598d465264b0187",
     "is_blinded": true,
-    "unblinded_address": "XV4PaYgbaJdPnYaJDzE41TpbBF6yBieeyd"
+    "unconfidential_address": "XV4PaYgbaJdPnYaJDzE41TpbBF6yBieeyd"
   }
 
 :blinding_key: The blinding key used to blind this address.
 :blinding_script: The script used to generate the blinding key via https://github.com/satoshilabs/slips/blob/master/slip-0077.md.
 :is_blinded: Always ``true``.
-:unblinded_address: The unblinded address. This is provided for informational purposes only and should not be used to receive.
+:unconfidential_address: The non-confidential address corresponding to ``address``.  This
+    is provided for informational purposes only and should not be used to receive.
 
 
 .. _previous-addresses-request:
@@ -1023,7 +1379,8 @@ or which unspent outputs to include in the balance returned by `GA_get_balance`.
     "all_coins": false,
     "expired_at": 99999,
     "confidential": false,
-    "dust_limit": 546
+    "dust_limit": 546,
+    "sort_by": "newest"
   }
 
 :subaccount: The subaccount to fetch unspent outputs for.
@@ -1033,6 +1390,9 @@ or which unspent outputs to include in the balance returned by `GA_get_balance`.
     by the given block are returned.
 :confidential: Pass ``true`` to include only confidential UTXOs. Defaults to ``false``.
 :dust_limit: If given, only UTXOs with a value greater than the limit value are returned.
+:sort_by: One of ``"oldest"``, ``"newest"``, ``"largest"``, ``"smallest"``. Returns the
+     unspent outputs sorted by block height or value respectively. If not given, defaults
+     to ``"oldest"`` for 2of2 subaccounts and ``"largest"`` for other subaccount types.
 
 
 .. _unspent-outputs:
@@ -1078,7 +1438,7 @@ Contains the filtered unspent outputs.
                Is 0 if the transaction is unconfirmed.
 :address_type: One of ``"csv"``, ``"p2sh"``, ``"p2wsh"`` (multisig),
     or ``"p2pkh"``, ``"p2sh-p2wpkh"``, ``"p2wpkh"`` (singlesig), indicating the type of address.
-:is_internal: Whether or not the user key belongs to the internal chain.
+:is_internal: Whether or not the user key belongs to the internal chain. Always false for multisig.
 :pointer: The user key number/final number in the derivation path.
 :subaccount: The subaccount this output belongs to.
              Matches ``"pointer"`` from :ref:`subaccount-list` or :ref:`subaccount-detail`.
@@ -1100,23 +1460,23 @@ For Liquid the inner maps have additional fields:
 .. code-block:: json
 
   {
-    "confidential": true,
-    "asset_id": "e4b76d990f27bf6063cb66ff5bbc783d03258a0406ba8ac09abab7610d547e72",
-    "assetblinder": "aedb6c37d0ea0bc64fbc7036b52d0a0784da0b1ca90ac918c19ee1025b0c944c",
     "amountblinder": "3be117b88ba8284b05b89998bdee1ded8cd5b561ae3d05bcd91d4e8abab2cd47",
+    "asset_id": "e4b76d990f27bf6063cb66ff5bbc783d03258a0406ba8ac09abab7610d547e72",
     "asset_tag": "0b103a2d34cf469987dd06937919f9dae8c9856be17c554fd408fdc226b1769e59",
+    "assetblinder": "aedb6c37d0ea0bc64fbc7036b52d0a0784da0b1ca90ac918c19ee1025b0c944c",
     "commitment": "094c3f83d5bac22b527ccac141fe04883d79bf04aef10a1dd42f501c5b51318907",
-    "nonce_commitment": "0211b39afe463473e428cfafd387f9c85b350f440131fad03aa5f4809b6c834f30",
+    "is_blinded": true,
+    "nonce_commitment": "0211b39afe463473e428cfafd387f9c85b350f440131fad03aa5f4809b6c834f30"
   }
 
-:confidential: Whether or not the output is confidential.
-:asset_id: The hex-encoded asset id.
-:assetblinder: The hex-encoded asset blinder (asset blinding factor, abf)
-:amountblinder: The hex-encoded amount blinder (value blinding factor, vbf)
-:asset_tag: The hex-encoded asset commitment.
-:commitment: The hex-encoded value commitment.
-:nonce_commitment: The hex-encoded nonce commitment.
 
+:amountblinder: The hex-encoded amount blinder (value blinding factor, vbf).
+:asset_id: The hex-encoded asset id in display format.
+:asset_tag: The hex-encoded asset commitment.
+:assetblinder: The hex-encoded asset blinder (asset blinding factor, abf).
+:commitment: The hex-encoded value commitment.
+:is_blinded: A boolean indicating whether or not the output is blinded.
+:nonce_commitment: The hex-encoded nonce commitment.
 
 .. _unspent-outputs-status:
 
@@ -1246,7 +1606,9 @@ Auth handler status JSON
 
 Describes the status of a GA_auth_handler. Returned by `GA_auth_handler_get_status`.
 
-The data returned depends on the current state of the handler, as follows:
+All status JSON contains a ``"name"`` element with the name of the handler being invoked.
+
+The remaining data returned depends on the current state of the handler, as follows:
 
 * ``"done"``:
 
@@ -1296,7 +1658,8 @@ The data returned depends on the current state of the handler, as follows:
   }
 
 :action: The action being processed.
-:methods: A list of the two factor methods the user has enabled.
+:methods: A list of available two factor methods the user has enabled, or the
+    single element ``"data"`` if the call requires more data to continue.
 
 * ``"resolve_code"`` (two factor):
 
@@ -1332,6 +1695,21 @@ The data returned depends on the current state of the handler, as follows:
 
 :action: The action being processed.
 :required_data: Contains the data the HWW must provide, see :ref:`hw-resolve-overview`.
+
+* ``"resolve_code"`` (request for additional data):
+
+.. code-block:: json
+
+  {
+    "status": "resolve_code",
+    "action": "data",
+    "method": "data",
+    "auth_data": {}
+  }
+
+:action: Always "data".
+:method: Always "data".
+:auth_data: Method-specific ancillary data for processing the additional data request.
 
 
 .. _reconnect:
@@ -1485,8 +1863,7 @@ Asset parameters JSON
 
    {
       "assets": true,
-      "icons": true,
-      "refresh": true
+      "icons": true
    }
 
 .. _get-assets-params:
@@ -1494,17 +1871,32 @@ Asset parameters JSON
 Get assets parameters JSON
 --------------------------
 
+Informations about Liquid assets can be obtained by either passing a list of
+asset ids to query:
+
 .. code-block:: json
 
    {
-      "assets_id": ["6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d","144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49"],
+      "assets_id": ["6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d","ce091c998b83c78bb71a632313ba3760f1763d9cfcffae02258ffa9865a37bd2"]
    }
 
+or by specifying one or more of the following attributes:
 
-.. _asset-informations:
+:names: a list of strings representing asset names;
+:tickers: a list of strings representing asset tickers:
+:category: must be one of:
+        - ``"with_icons"``: only assets that have icons associated to them will be returned;
+        - ``"hard_coded"``: only assets bundled in the GDK release will be returned;
+        - ``"all"``: all the locally-stored assets and icons will be returned.
 
-Asset informations JSON
---------------------------
+Specifying multiple attributes is interpreted as a logical AND. For example,
+``{"category": "with_icons", "tickers": ["LCAD"]}`` will return all the assets
+with ticker ``LCAD`` that also have an icon.
+
+.. _asset-details:
+
+Asset details JSON
+------------------
 
 .. code-block:: json
 
@@ -1560,3 +1952,61 @@ Parameters controlling the `GA_get_subaccounts` call.
    }
 
 :refresh: If set to ``true``, subaccounts are re-discovered if appropriate for the session type. Note that this will take significantly more time if set. Defaults to ``false``.
+
+
+.. _validate-details:
+
+Validate JSON
+-------------
+
+Passed to `GA_validate` to check the validity of gdk input data.
+
+To validate addressees, for example prior to calling `GA_create_transaction`:
+
+.. code-block:: json
+
+  {
+    "addressees": {}
+  }
+
+:addressees: An array of :ref:`addressee` elements.
+
+Validation includes that the address is correct and supported by the network,
+and that the amount given is valid. The given amount in whatever denomination
+will be converted into ``"satoshi"`` in the returned addressee. For Liquid, a
+valid hex ``"asset_id"`` must be present.
+
+
+To validate a LiquiDEX version 1 proposal:
+
+.. code-block:: json
+
+  {
+    "liquidex_v1": {
+      "proposal": {}
+    }
+  }
+
+:liquidex_v1/proposal: The LiquiDEX version 1 proposal to validate.
+
+.. _validate-result:
+
+Validate Result JSON
+--------------------
+
+Returned from `GA_validate` to indicate the validity of the given JSON document.
+
+.. code-block:: json
+
+  {
+    "is_valid": true,
+    "errors": [],
+    "addressees": {}
+  }
+
+:is_valid: ``true`` if the JSON is valid, ``false`` otherwise.
+:errors: An array of strings describing each error found in the given document;
+         Empty if ``"is_valid"`` is ``true``.
+:addressees: If validating addressees, the given :ref:`addressee` elements with
+         data sanitized and converted if required. For example, BIP21 URLs are
+         converted to addresses, plus amount/asset if applicable.

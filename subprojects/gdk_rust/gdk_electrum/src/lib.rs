@@ -4,22 +4,19 @@ mod store;
 extern crate serde_json;
 
 #[macro_use]
-extern crate lazy_static;
-
-#[macro_use]
 extern crate gdk_common;
 
+use gdk_common::log::{debug, info, trace, warn};
+use gdk_pin_client::{Pin, PinClient, PinData};
 use headers::bitcoin::HEADERS_FILE_MUTEX;
-use log::{debug, info, trace, warn};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod account;
 pub mod error;
 pub mod headers;
 pub mod interface;
-mod notification;
-pub mod pin;
-pub mod pset;
+pub mod session;
 pub mod spv;
 
 use crate::account::{
@@ -30,62 +27,54 @@ use crate::error::Error;
 use crate::interface::ElectrumUrl;
 use crate::store::*;
 
-use bitcoin::hashes::hex::{FromHex, ToHex};
-use bitcoin::secp256k1::{self, SecretKey};
-use bitcoin::util::bip32::{DerivationPath, ExtendedPrivKey, ExtendedPubKey};
+use gdk_common::bitcoin::hashes::hex::{FromHex, ToHex};
+use gdk_common::bitcoin::util::bip32::{
+    DerivationPath, ExtendedPrivKey, ExtendedPubKey, Fingerprint,
+};
+use gdk_common::{bitcoin, elements};
 
-use electrum_client::GetHistoryRes;
-use gdk_common::be::*;
 use gdk_common::model::*;
 use gdk_common::network::NetworkParameters;
 use gdk_common::wally::{
     self, asset_blinding_key_from_seed, asset_blinding_key_to_ec_private_key, MasterBlindingKey,
 };
+use gdk_common::{be::*, State};
 
-use elements::confidential::{self, Asset, Nonce};
+use gdk_common::electrum_client::{self, ScriptStatus};
+use gdk_common::elements::confidential::{self, Asset, Nonce};
+use gdk_common::error::Error::{BtcEncodingError, ElementsEncodingError};
+use gdk_common::exchange_rates::{Currency, ExchangeRatesCache};
+use gdk_common::network;
 use gdk_common::NetworkId;
-use serde::{Deserialize, Serialize};
+use gdk_common::EC;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 use std::{iter, thread};
 
 use crate::headers::bitcoin::HeadersChain;
 use crate::headers::liquid::Verifier;
 use crate::headers::ChainOrVerifier;
-pub use crate::notification::{NativeNotif, Notification, TransactionNotification};
-use crate::pin::PinManager;
 use crate::spv::SpvCrossValidator;
-use aes::Aes256;
-use bitcoin::blockdata::constants::DIFFCHANGE_INTERVAL;
-use block_modes::block_padding::Pkcs7;
-use block_modes::BlockMode;
-use block_modes::Cbc;
 use electrum_client::{Client, ElectrumApi};
-use rand::seq::SliceRandom;
-use rand::thread_rng;
-use rand::Rng;
+use gdk_common::bitcoin::blockdata::constants::DIFFCHANGE_INTERVAL;
+pub use gdk_common::notification::{NativeNotif, Notification, TransactionNotification};
+use gdk_common::rand::seq::SliceRandom;
+use gdk_common::rand::thread_rng;
+use gdk_common::ureq;
 use std::collections::hash_map::DefaultHasher;
-use std::fmt;
 use std::hash::Hasher;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 
 const CROSS_VALIDATION_RATE: u8 = 4; // Once every 4 thread loop runs, or roughly 28 seconds
+pub const GAP_LIMIT: u32 = 20;
 
-lazy_static! {
-    static ref EC: secp256k1::Secp256k1<secp256k1::All> = {
-        let mut ctx = secp256k1::Secp256k1::new();
-        let mut rng = rand::thread_rng();
-        ctx.randomize(&mut rng);
-        ctx
-    };
-}
-
-type Aes256Cbc = Cbc<Aes256, Pkcs7>;
+type ScriptStatuses = HashMap<bitcoin::Script, ScriptStatus>;
 
 struct Syncer {
     accounts: Arc<RwLock<HashMap<u32, Account>>>,
@@ -119,6 +108,13 @@ pub struct ElectrumSession {
     ///
     /// It is Some after wallet initialization
     pub master_xpub: Option<ExtendedPubKey>,
+
+    /// The BIP32 fingerprint of the master xpub
+    ///
+    /// If watch-only `master_xpub` is `None`, thus we have this value here.
+    /// If watch-only with slip132 exteneded keys, this value is not known, and we use the default value, i.e. `00000000`.
+    master_xpub_fingerprint: Fingerprint,
+
     pub notify: NativeNotif,
     pub handles: Vec<JoinHandle<()>>,
 
@@ -142,41 +138,14 @@ pub struct ElectrumSession {
     ///
     /// This set it emptied after every sync.
     pub recent_spent_utxos: Arc<RwLock<HashSet<BEOutPoint>>>,
-}
 
-#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum State {
-    Disconnected,
-    Connected,
-}
+    xr_cache: ExchangeRatesCache,
 
-impl From<bool> for State {
-    fn from(b: bool) -> Self {
-        if b {
-            State::Connected
-        } else {
-            State::Disconnected
-        }
-    }
-}
+    /// The keys are exchange names, the values are all the currencies that a
+    /// given exchange has data for.
+    available_currencies: Option<HashMap<String, Vec<Currency>>>,
 
-impl From<State> for bool {
-    fn from(s: State) -> Self {
-        match s {
-            State::Connected => true,
-            State::Disconnected => false,
-        }
-    }
-}
-
-impl fmt::Display for State {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        match self {
-            State::Disconnected => write!(f, "disconnected"),
-            State::Connected => write!(f, "connected"),
-        }
-    }
+    first_sync: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -195,29 +164,6 @@ impl StateUpdater {
             let state: State = new_network_call_succeeded.into();
             self.notify.network(state, State::Connected);
         }
-    }
-}
-
-pub fn determine_electrum_url(network: &NetworkParameters) -> Result<ElectrumUrl, Error> {
-    if let Some(true) = network.use_tor {
-        if let Some(electrum_onion_url) = network.electrum_onion_url.as_ref() {
-            if !electrum_onion_url.is_empty() {
-                return Ok(ElectrumUrl::Plaintext(electrum_onion_url.into()));
-            }
-        }
-    }
-    let electrum_url = network
-        .electrum_url
-        .as_ref()
-        .ok_or_else(|| Error::Generic("network url is missing".into()))?;
-    if electrum_url == "" {
-        return Err(Error::Generic("network url is empty".into()));
-    }
-
-    if network.electrum_tls.unwrap_or(false) {
-        Ok(ElectrumUrl::Tls(electrum_url.into(), network.validate_domain.unwrap_or(false)))
-    } else {
-        Ok(ElectrumUrl::Plaintext(electrum_url.into()))
     }
 }
 
@@ -251,29 +197,27 @@ fn try_get_fee_estimates(client: &Client) -> Result<Vec<FeeEstimate>, Error> {
     Ok(estimates)
 }
 
-impl ElectrumSession {
-    pub fn create_session(
-        network: NetworkParameters,
-        proxy: Option<&str>,
-        url: ElectrumUrl,
-    ) -> Self {
-        Self {
-            proxy: socksify(proxy),
-            network,
-            url,
-            accounts: Arc::new(RwLock::new(HashMap::<u32, Account>::new())),
-            notify: NativeNotif::new(),
-            handles: vec![],
-            user_wants_to_sync: Arc::new(AtomicBool::new(false)),
-            last_network_call_succeeded: Arc::new(AtomicBool::new(false)),
-            timeout: None,
-            store: None,
-            master_xpub: None,
-            master_xprv: None,
-            recent_spent_utxos: Arc::new(RwLock::new(HashSet::<BEOutPoint>::new())),
-        }
-    }
+#[derive(Serialize, Deserialize)]
+pub struct EncryptWithPinDetails {
+    /// The PIN to protect the server-provided encryption key with.
+    pin: Pin,
 
+    /// The plaintext to encrypt.
+    plaintext: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DecryptWithPinDetails {
+    /// The PIN used to encrypt the `PinData`.
+    pin: Pin,
+
+    /// The data containing the plaintext to decrypt. Can be obtained by
+    /// calling [`encrypt_with_pin`](ElectrumSession::encrypt_with_pin) with
+    /// the same PIN.
+    pin_data: PinData,
+}
+
+impl ElectrumSession {
     pub fn get_accounts(&self) -> Result<Vec<Account>, Error> {
         // The Account struct is immutable and we don't allow account deletion.
         // Thus we can clone without the risk of having inconsistent data.
@@ -294,13 +238,7 @@ impl ElectrumSession {
     }
 
     pub fn build_request_agent(&self) -> Result<ureq::Agent, Error> {
-        match &self.proxy {
-            Some(proxy) if !proxy.is_empty() => {
-                let proxy = ureq::Proxy::new(&proxy)?;
-                Ok(ureq::AgentBuilder::new().proxy(proxy).build())
-            }
-            _ => Ok(ureq::agent()),
-        }
+        network::build_request_agent(self.proxy.as_deref()).map_err(Into::into)
     }
 
     pub fn poll_session(&self) -> Result<(), Error> {
@@ -328,12 +266,12 @@ impl ElectrumSession {
             match electrum_url.build_client(proxy.as_deref(), None) {
                 Ok(client) => match client.ping() {
                     Ok(_) => {
-                        info!("connect succesfully ping the electrum server");
+                        info!("succesfully pinged electrum server {:?}", electrum_url.url());
                         self.last_network_call_succeeded.store(true, Ordering::Relaxed);
                         true
                     }
                     Err(e) => {
-                        warn!("ping failed {:?}", e);
+                        warn!("failed to ping electrum server {:?}: {:?}", electrum_url.url(), e);
                         false
                     }
                 },
@@ -367,34 +305,40 @@ impl ElectrumSession {
         Ok(())
     }
 
-    pub fn credentials_from_pin_data(
-        &mut self,
-        details: PinGetDetails,
-    ) -> Result<Credentials, Error> {
+    fn inner_decrypt_with_pin(&self, details: &DecryptWithPinDetails) -> Result<Vec<u8>, Error> {
         let agent = self.build_request_agent()?;
-        let manager = PinManager::new(
+
+        let pin_client = PinClient::new(
             agent,
-            self.network.pin_server_url(),
-            &self.network.pin_manager_public_key()?,
-        )?;
-        let client_key =
-            SecretKey::from_slice(&Vec::<u8>::from_hex(&details.pin_data.pin_identifier)?)?;
-        let server_key = manager.get_pin(details.pin.as_bytes(), &client_key)?;
-        let iv = Vec::<u8>::from_hex(&details.pin_data.salt)?;
-        let decipher = Aes256Cbc::new_from_slices(&server_key[..], &iv).unwrap();
-        // If the pin is wrong, pinserver returns a random key and decryption fails, return a
-        // specific error to signal the caller to update its pin counter.
-        let decrypted = decipher
-            .decrypt_vec(&Vec::<u8>::from_hex(&details.pin_data.encrypted_data)?)
-            .map_err(|_| Error::InvalidPin)?;
-        if let Ok(credentials) = serde_json::from_slice(&decrypted[..]) {
+            self.network.pin_server_url()?,
+            self.network.pin_server_public_key()?,
+        );
+
+        pin_client.decrypt(&details.pin_data, &details.pin).map_err(Into::into)
+    }
+
+    pub fn decrypt_with_pin(
+        &self,
+        details: &DecryptWithPinDetails,
+    ) -> Result<serde_json::Value, Error> {
+        let decrypted = self.inner_decrypt_with_pin(details)?;
+        if let Ok(plaintext) = serde_json::from_slice(&decrypted) {
+            Ok(plaintext)
+        } else {
+            let credentials = bare_mnemonic_from_utf8(&decrypted)?;
+            Ok(serde_json::to_value(credentials)?)
+        }
+    }
+
+    pub fn credentials_from_pin_data(
+        &self,
+        details: &DecryptWithPinDetails,
+    ) -> Result<Credentials, Error> {
+        let decrypted = self.inner_decrypt_with_pin(details)?;
+        if let Ok(credentials) = serde_json::from_slice(&decrypted) {
             Ok(credentials)
         } else {
-            // Some pin_data encrypt the bare mnemonic, not a json
-            Ok(Credentials {
-                mnemonic: std::str::from_utf8(&decrypted)?.to_string(),
-                bip39_passphrase: "".to_string(),
-            })
+            bare_mnemonic_from_utf8(&decrypted)
         }
     }
 
@@ -412,7 +356,9 @@ impl ElectrumSession {
             self.store = Some(store);
         }
         self.master_xpub = Some(opt.master_xpub);
-        self.notify.settings(&self.get_settings()?);
+        self.master_xpub_fingerprint =
+            opt.master_xpub_fingerprint.unwrap_or_else(|| opt.master_xpub.fingerprint());
+        self.notify.settings(&self.get_settings().ok_or_else(|| Error::StoreNotLoaded)?);
         Ok(())
     }
 
@@ -446,6 +392,34 @@ impl ElectrumSession {
         Ok(self.store.as_ref().ok_or_else(|| Error::StoreNotLoaded)?.clone())
     }
 
+    pub fn login_wo(&mut self, credentials: WatchOnlyCredentials) -> Result<LoginData, Error> {
+        if self.network.liquid {
+            return Err(Error::Generic("Watch-only login not implemented for Liquid".into()));
+        }
+
+        // Create a fake master xpub deriving it from the WatchOnlyCredentials
+        let master_xpub = credentials.store_master_xpub(&self.network)?;
+        let (accounts, master_xpub_fingerprint) = credentials.accounts(self.network.mainnet)?;
+        self.load_store(&LoadStoreOpt {
+            master_xpub,
+            master_xpub_fingerprint: Some(master_xpub_fingerprint),
+        })?;
+
+        for account in accounts {
+            self.create_subaccount(CreateAccountOpt {
+                subaccount: account.account_num,
+                name: "".to_string(),
+                xpub: Some(account.xpub),
+                discovered: false,
+                is_already_created: true,
+                allow_gaps: true,
+            })?;
+        }
+
+        self.start_threads()?;
+        self.get_wallet_hash_id()
+    }
+
     pub fn login(&mut self, credentials: Credentials) -> Result<LoginData, Error> {
         info!(
             "login {:?} last network call succeeded {:?}",
@@ -463,6 +437,7 @@ impl ElectrumSession {
 
         self.load_store(&LoadStoreOpt {
             master_xpub: master_xpub.clone(),
+            master_xpub_fingerprint: None,
         })?;
 
         if self.network.liquid {
@@ -482,13 +457,15 @@ impl ElectrumSession {
                 subaccount: account_num,
             })?;
             let xprv = master_xprv.derive_priv(&crate::EC, &path.path).unwrap();
-            let xpub = ExtendedPubKey::from_private(&crate::EC, &xprv);
+            let xpub = ExtendedPubKey::from_priv(&crate::EC, &xprv);
 
             self.create_subaccount(CreateAccountOpt {
                 subaccount: account_num,
                 name: "".to_string(),
                 xpub: Some(xpub),
                 discovered: false,
+                is_already_created: true,
+                allow_gaps: false,
             })?;
         }
 
@@ -535,7 +512,10 @@ impl ElectrumSession {
             let tip_height = store_read.cache.tip_height();
             let tip_hash = store_read.cache.tip_block_hash();
             let tip_prev_hash = store_read.cache.tip_prev_block_hash();
-            self.notify.block_from_hashes(tip_height, &tip_hash, &tip_prev_hash);
+            // Do not notify a block if we haven't fetched one yet
+            if tip_hash != BEBlockHash::default() {
+                self.notify.block_from_hashes(tip_height, &tip_hash, &tip_prev_hash);
+            }
         };
 
         info!(
@@ -559,7 +539,7 @@ impl ElectrumSession {
             });
         }
 
-        let sync_interval = self.network.sync_interval.unwrap_or(7);
+        let sync_interval = self.network.sync_interval.unwrap_or(1);
 
         if self.network.spv_enabled.unwrap_or(false) {
             let checker = match self.network.id() {
@@ -593,7 +573,7 @@ impl ElectrumSession {
                 let mut round = 0u8;
 
                 'outer: loop {
-                    if wait_or_close(&user_wants_to_sync, sync_interval) {
+                    if wait_or_close(&user_wants_to_sync, 7) {
                         info!("closing headers thread");
                         break;
                     }
@@ -629,6 +609,12 @@ impl ElectrumSession {
                                         break;
                                     }
                                     // XXX clear affected blocks/txs more surgically?
+                                }
+                                Err(Error::Common(BtcEncodingError(_)))
+                                | Err(Error::Common(ElementsEncodingError(_))) => {
+                                    // We aren't able to decode the blockheaders returned by the server,
+                                    // do not sync headers further.
+                                    break 'outer;
                                 }
                                 Err(e) => {
                                     warn!("error while asking headers {}", e);
@@ -685,38 +671,9 @@ impl ElectrumSession {
 
         info!("login STATUS block:{:?} tx:{}", self.block_status()?, self.tx_status()?);
 
-        let notify_blocks = self.notify.clone();
-
         let user_wants_to_sync = self.user_wants_to_sync.clone();
-        let tipper_url = self.url.clone();
-        let proxy = self.proxy.clone();
-
-        let tipper_handle = thread::spawn(move || {
-            info!("starting tipper thread");
-            loop {
-                if let Ok(client) = tipper_url.build_client(proxy.as_deref(), None) {
-                    match tipper.tip(&client) {
-                        Ok(None) => {} // nothing to update
-                        Ok(Some((height, header))) => {
-                            // This is a new block
-                            notify_blocks.block_from_header(height, &header);
-                        }
-                        Err(e) => {
-                            warn!("exception in tipper {:?}", e);
-                        }
-                    }
-                }
-                if wait_or_close(&user_wants_to_sync, sync_interval) {
-                    info!("closing tipper thread");
-                    break;
-                }
-            }
-        });
-        self.handles.push(tipper_handle);
-
-        let user_wants_to_sync = self.user_wants_to_sync.clone();
-        let notify_txs = self.notify.clone();
-        let syncer_url = self.url.clone();
+        let notify = self.notify.clone();
+        let url = self.url.clone();
         let proxy = self.proxy.clone();
 
         // Only the syncer thread is responsible to send network notification due for the state
@@ -724,43 +681,133 @@ impl ElectrumSession {
         // works while another don't. Once we categorize the disconnection by endpoint we can
         // monitor state of every network call.
         let state_updater = self.state_updater()?;
+        let first_sync = self.first_sync.clone();
 
-        let syncer_handle = thread::spawn(move || {
-            info!("starting syncer thread");
-            let mut first_sync = true;
-            loop {
-                match syncer_url.build_client(proxy.as_deref(), None) {
-                    Ok(client) => match syncer.sync(&client) {
-                        Ok(tx_ntfs) => {
-                            state_updater.update_if_needed(true);
-                            // Skip sending transaction notifications if it's the first call to
-                            // sync. This allows us to _not_ notify transactions that were sent or
-                            // received before login.
-                            if !first_sync {
-                                for ntf in tx_ntfs.iter() {
-                                    info!("there are new transactions");
-                                    notify_txs.updated_txs(ntf);
-                                }
-                            }
+        let syncer_tipper_handle = thread::spawn(move || {
+            info!("starting syncer & tipper thread");
+
+            let mut txs_to_notify = vec![];
+
+            // electrum_client::Client stores the last electrum_client::ScriptStatus
+            // for each script it has subscribed to, however to access it we have
+            // to use `script_pop` which removes the status from the Client internal
+            // storage. OTOH we need to remember the last script status corresponding
+            // to a script, since it is needed to determine if the script had a
+            // transaction and if its status has changed w.r.t. to the cached one.
+            // So we store the last statuses for each script in this map.
+            let mut last_statuses = ScriptStatuses::new();
+
+            let mut client = loop {
+                // In theory this loop is superfluous, because the client is created at the
+                // beginning of the next loop before being used, however, rust compiler thinks
+                // it could be not initialized so we need to initialize it.
+                match url.build_client(proxy.as_deref(), None) {
+                    Ok(new_client) => break new_client,
+                    Err(_) => {
+                        if wait_or_close(&user_wants_to_sync, sync_interval) {
+                            // The thread needs to stop when `user_wants_to_sync` is false.
+                            // below this is done by just breaking from the main loop,
+                            // but here we are out of the loop so we return.
+                            // (If you start the threads without connection you are stuck in this
+                            // loop so it must be handled)
+                            info!(
+                                "closing syncer & tipper thread by breaking build client attempts"
+                            );
+                            return;
                         }
-                        Err(e) => {
-                            state_updater.update_if_needed(false);
-                            warn!("Error during sync, {:?}", e)
-                        }
-                    },
-                    Err(e) => {
-                        state_updater.update_if_needed(false);
-                        warn!("Can't build client {:?}", e)
                     }
-                }
-                if wait_or_close(&user_wants_to_sync, sync_interval) {
-                    info!("closing syncer thread");
+                };
+            };
+
+            let mut avoid_first_wait = true;
+            loop {
+                let is_connected = state_updater.current.load(Ordering::Relaxed);
+                debug!("loop start is_connected:{is_connected}");
+
+                if avoid_first_wait {
+                    avoid_first_wait = false;
+                } else if wait_or_close(&user_wants_to_sync, sync_interval) {
+                    info!("closing syncer & tipper thread");
                     break;
                 }
-                first_sync = false;
+
+                if !is_connected {
+                    match url.build_client(proxy.as_deref(), None) {
+                        Ok(new_client) => client = new_client,
+                        Err(e) => {
+                            warn!("cannot build client {e:?}");
+                            continue;
+                        }
+                    };
+                }
+
+                let tip_before_sync = match tipper.server_tip(&client) {
+                    Ok(height) => height,
+                    Err(Error::Common(BtcEncodingError(_)))
+                    | Err(Error::Common(ElementsEncodingError(_))) => {
+                        // We aren't able to decode the blockheaders returned by the server,
+                        // do not sync further.
+                        break;
+                    }
+                    Err(e) => {
+                        state_updater.update_if_needed(false);
+                        warn!("exception in tipper {e:?}");
+                        continue;
+                    }
+                };
+
+                match syncer.sync(&client, &mut last_statuses, &user_wants_to_sync) {
+                    Ok(tx_ntfs) => {
+                        state_updater.update_if_needed(true);
+                        // Skip sending transaction notifications if it's the
+                        // first call to sync. This allows us to _not_ notify
+                        // transactions that were sent or received before
+                        // login.
+                        if first_sync.load(Ordering::Relaxed) {
+                            info!("first sync completed");
+                        } else {
+                            txs_to_notify.extend(tx_ntfs);
+                        }
+                        first_sync.store(false, Ordering::Relaxed);
+                    }
+                    Err(Error::UserDontWantToSync) => {
+                        warn!("{}", Error::UserDontWantToSync);
+                        break;
+                    }
+                    Err(e) => {
+                        state_updater.update_if_needed(false);
+                        warn!("Error during sync, {:?}", e);
+                        continue;
+                    }
+                }
+
+                let tip_after_sync = match tipper.server_tip(&client) {
+                    Ok(height) => height,
+                    Err(_) => {
+                        continue;
+                    }
+                };
+
+                if tip_before_sync != tip_after_sync {
+                    // If a block arrives while we are syncing
+                    // transactions, transactions might be returned as
+                    // unconfirmed even if they belong to the newly
+                    // notified block. Sync again to ensure
+                    // consistency.
+                    continue;
+                }
+                if let Ok(Some((height, header))) =
+                    tipper.update_cache_if_needed(tip_after_sync.0, tip_after_sync.1)
+                {
+                    notify.block_from_header(height, &header);
+                }
+                while let Some(ntf) = txs_to_notify.pop() {
+                    info!("New tx notification: {}", ntf.txid);
+                    notify.updated_txs(&ntf);
+                }
             }
         });
-        self.handles.push(syncer_handle);
+        self.handles.push(syncer_tipper_handle);
 
         Ok(())
     }
@@ -769,6 +816,7 @@ impl ElectrumSession {
         let master_xpub = self.master_xpub.ok_or_else(|| Error::WalletNotInitialized)?;
         Ok(LoginData {
             wallet_hash_id: self.network.wallet_hash_id(&master_xpub),
+            xpub_hash_id: self.network.xpub_hash_id(&master_xpub),
         })
     }
 
@@ -789,24 +837,15 @@ impl ElectrumSession {
 
     pub fn encrypt_with_pin(&self, details: &EncryptWithPinDetails) -> Result<PinData, Error> {
         let agent = self.build_request_agent()?;
-        let manager = PinManager::new(
-            agent,
-            self.network.pin_server_url(),
-            &self.network.pin_manager_public_key()?,
-        )?;
-        let client_key = SecretKey::new(&mut thread_rng());
-        let server_key = manager.set_pin(details.pin.as_bytes(), &client_key)?;
-        let iv = thread_rng().gen::<[u8; 16]>();
-        let cipher = Aes256Cbc::new_from_slices(&server_key[..], &iv).unwrap();
-        let plaintext = serde_json::to_vec(&details.plaintext)?;
-        let encrypted = cipher.encrypt_vec(&plaintext);
 
-        let result = PinData {
-            salt: iv.to_hex(),
-            encrypted_data: encrypted.to_hex(),
-            pin_identifier: client_key.to_hex(),
-        };
-        Ok(result)
+        let pin_client = PinClient::new(
+            agent,
+            self.network.pin_server_url()?,
+            self.network.pin_server_public_key()?,
+        );
+
+        let plaintext = serde_json::to_vec(&details.plaintext)?;
+        pin_client.encrypt(&plaintext, &details.pin).map_err(Into::into)
     }
 
     /// Get the subaccount pointers/numbers from the store
@@ -825,8 +864,8 @@ impl ElectrumSession {
         Ok(account_nums)
     }
 
-    pub fn get_subaccounts(&mut self) -> Result<Vec<AccountInfo>, Error> {
-        self.get_accounts()?.iter().map(|a| a.info()).collect()
+    pub fn get_subaccounts(&mut self) -> Result<Vec<AccountInfoPruned>, Error> {
+        self.get_accounts()?.iter().map(|a| a.info().map(|i| i.into())).collect()
     }
 
     pub fn get_subaccount(&self, account_num: u32) -> Result<AccountInfo, Error> {
@@ -843,48 +882,40 @@ impl ElectrumSession {
         })
     }
 
-    pub fn get_subaccount_xpub(
-        &mut self,
-        opt: GetAccountXpubOpt,
-    ) -> Result<GetAccountXpubResult, Error> {
-        // If the account cache is missing, we also return None
-        let xpub = self.store()?.read()?.account_cache(opt.subaccount).map_or(None, |c| c.xpub);
-        Ok(GetAccountXpubResult {
-            xpub,
-        })
-    }
-
     pub fn create_subaccount(&mut self, opt: CreateAccountOpt) -> Result<AccountInfo, Error> {
         let master_xprv = self.master_xprv.clone();
         let store = self.store()?.clone();
         let master_blinding = store.read()?.cache.master_blinding.clone();
         let network = self.network.clone();
         let mut accounts = self.accounts.write()?;
-        // Check that the given subaccount number is the next available one for its script type.
-        let (script_type, _) = get_account_script_purpose(opt.subaccount)?;
-        let (last_account, next_account) =
-            get_last_next_account_nums(accounts.keys().copied().collect(), script_type);
+        if !opt.allow_gaps {
+            // Check that the given subaccount number is the next available one for its script type.
+            let (script_type, _) = get_account_script_purpose(opt.subaccount)?;
+            let (last_account, next_account) =
+                get_last_next_account_nums(accounts.keys().copied().collect(), script_type);
 
-        if opt.subaccount != next_account {
-            // The subaccount already exists, or skips over the next available subaccount number
-            bail!(Error::InvalidSubaccount(opt.subaccount));
-        }
-        if let Some(last_account) = last_account {
-            // This is the next subaccount number, but the last one is still unused
-            let account = accounts
-                .get(&last_account)
-                .ok_or_else(|| Error::InvalidSubaccount(last_account))?;
-            if !account.has_transactions()? {
-                bail!(Error::AccountGapsDisallowed);
+            if opt.subaccount != next_account {
+                // The subaccount already exists, or skips over the next available subaccount number
+                bail!(Error::InvalidSubaccount(opt.subaccount));
+            }
+            if let Some(last_account) = last_account {
+                // This is the next subaccount number, but the last one is still unused
+                let account = accounts
+                    .get(&last_account)
+                    .ok_or_else(|| Error::InvalidSubaccount(last_account))?;
+                if !opt.is_already_created && !account.has_transactions()? {
+                    bail!(Error::AccountGapsDisallowed);
+                }
             }
         }
 
         let account = match accounts.entry(opt.subaccount) {
-            Entry::Occupied(entry) => (entry.into_mut()),
+            Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let account = entry.insert(Account::new(
                     network,
                     &master_xprv,
+                    self.master_xpub_fingerprint,
                     &opt.xpub, // account xpub
                     master_blinding,
                     store,
@@ -916,7 +947,7 @@ impl ElectrumSession {
         Ok(self.store()?.read()?.cache.tip_height())
     }
 
-    pub fn rename_subaccount(&mut self, opt: RenameAccountOpt) -> Result<(), Error> {
+    pub fn rename_subaccount(&mut self, opt: RenameAccountOpt) -> Result<bool, Error> {
         self.get_account(opt.subaccount)?.set_settings(UpdateAccountOpt {
             subaccount: opt.subaccount,
             name: Some(opt.new_name),
@@ -924,7 +955,7 @@ impl ElectrumSession {
         })
     }
 
-    pub fn set_subaccount_hidden(&mut self, opt: SetAccountHiddenOpt) -> Result<(), Error> {
+    pub fn set_subaccount_hidden(&mut self, opt: SetAccountHiddenOpt) -> Result<bool, Error> {
         self.get_account(opt.subaccount)?.set_settings(UpdateAccountOpt {
             subaccount: opt.subaccount,
             hidden: Some(opt.hidden),
@@ -932,7 +963,7 @@ impl ElectrumSession {
         })
     }
 
-    pub fn update_subaccount(&mut self, opt: UpdateAccountOpt) -> Result<(), Error> {
+    pub fn update_subaccount(&mut self, opt: UpdateAccountOpt) -> Result<bool, Error> {
         self.get_account(opt.subaccount)?.set_settings(opt)
     }
 
@@ -953,6 +984,27 @@ impl ElectrumSession {
         let store = self.store()?;
         let store = store.read()?;
         store.get_tx_entry(&txid).map(|e| e.into())
+    }
+
+    pub fn get_scriptpubkey_data(&self, script_pubkey: &str) -> Result<ScriptPubKeyData, Error> {
+        let script = BEScript::from_hex(script_pubkey, self.network.id())?;
+        let store = self.store()?;
+        let store = store.read()?;
+        let accounts = self.get_accounts()?;
+        for account in accounts.iter() {
+            let account_cache = store.account_cache(account.num())?;
+            if let Ok(path) = account_cache.get_path(&script) {
+                let (is_internal, pointer) = parse_path(path)?;
+                return Ok(ScriptPubKeyData {
+                    subaccount: account.num(),
+                    branch: 1,
+                    pointer: pointer,
+                    subtype: 0,
+                    is_internal: is_internal,
+                });
+            }
+        }
+        return Err(Error::ScriptPubkeyNotFound);
     }
 
     pub fn get_balance(&self, opt: &GetBalanceOpt) -> Result<Balances, Error> {
@@ -1083,31 +1135,55 @@ impl ElectrumSession {
         //TODO better implement default
     }
 
-    pub fn get_settings(&self) -> Result<Settings, Error> {
-        Ok(self.store()?.read()?.get_settings().unwrap_or_default())
+    pub fn get_min_fee_rate(&self) -> Result<u64, Error> {
+        Ok(self.store()?.read()?.min_fee_rate())
+    }
+
+    /// Return the settings or None if the store is not loaded (not logged in)
+    pub fn get_settings(&self) -> Option<Settings> {
+        Some(self.store().ok()?.read().ok()?.get_settings().unwrap_or_default())
     }
 
     pub fn change_settings(&mut self, value: &Value) -> Result<(), Error> {
-        let mut settings = self.get_settings()?;
+        let mut settings = self.get_settings().ok_or_else(|| Error::StoreNotLoaded)?;
         settings.update(value);
         self.store()?.write()?.insert_settings(Some(settings.clone()))?;
         self.notify.settings(&settings);
         Ok(())
     }
 
-    pub fn get_available_currencies(&self) -> Result<Value, Error> {
-        Ok(json!({ "all": [ "USD" ], "per_exchange": { "BITFINEX": [ "USD" ] } }))
-        // TODO implement
+    pub fn get_available_currencies(
+        &mut self,
+        params: &GetAvailableCurrenciesParams,
+    ) -> Result<Value, Error> {
+        let currencies = match &self.available_currencies {
+            Some(map) => map,
+
+            None => self.available_currencies.get_or_insert(fetch_available_currencies(
+                &self.build_request_agent()?,
+                &params.url,
+            )?),
+        };
+
+        let all = currencies.values().flatten().collect::<HashSet<_>>();
+
+        Ok(json!({ "all": all, "per_exchange": &currencies }))
     }
 
     pub fn get_unspent_outputs(&self, opt: &GetUnspentOpt) -> Result<GetUnspentOutputs, Error> {
         let mut unspent_outputs: HashMap<String, Vec<UnspentOutput>> = HashMap::new();
         let account = self.get_account(opt.subaccount)?;
-        let height = self.store()?.read()?.cache.tip_height();
+
+        let store = self.store()?;
+        let store_read = store.read()?;
+        let acc_store = store_read.account_cache(opt.subaccount)?;
+        let height = store_read.cache.tip_height();
+
         let num_confs = opt.num_confs.unwrap_or(0);
         let confidential_utxos_only = opt.confidential_utxos_only.unwrap_or(false);
+
         for outpoint in account.unspents()? {
-            let utxo = account.txo(&outpoint)?;
+            let utxo = account.txo(&outpoint, acc_store)?;
             let confirmations = match utxo.height {
                 None | Some(0) => 0,
                 Some(h) => (height + 1).saturating_sub(h),
@@ -1122,6 +1198,20 @@ impl ElectrumSession {
             (*unspent_outputs.entry(asset_id).or_insert(vec![])).push(utxo.try_into()?);
         }
         Ok(GetUnspentOutputs(unspent_outputs))
+    }
+
+    pub fn get_address_data(&self, opt: AddressDataRequest) -> Result<AddressDataResult, Error> {
+        let address = match self.network.id() {
+            NetworkId::Bitcoin(_) => BEAddress::Bitcoin(bitcoin::Address::from_str(&opt.address)?),
+            NetworkId::Elements(_) => {
+                BEAddress::Elements(elements::Address::from_str(&opt.address)?)
+            }
+        };
+        self.get_accounts()?
+            .into_iter()
+            .filter_map(|a| a.get_address_data(&address).ok())
+            .next()
+            .ok_or(Error::ScriptPubkeyNotFound)
     }
 
     pub fn export_cache(&mut self) -> Result<RawCache, Error> {
@@ -1160,16 +1250,23 @@ pub fn keys_from_credentials(
     let seed = wally::bip39_mnemonic_to_seed(&credentials.mnemonic, &credentials.bip39_passphrase)
         .ok_or(Error::InvalidMnemonic)?;
     let master_xprv = ExtendedPrivKey::new_master(network, &seed)?;
-    let master_xpub = ExtendedPubKey::from_private(&EC, &master_xprv);
+    let master_xpub = ExtendedPubKey::from_priv(&EC, &master_xprv);
     let master_blinding = asset_blinding_key_from_seed(&seed);
     Ok((master_xprv, master_xpub, master_blinding))
 }
 
 impl Tipper {
-    pub fn tip(&self, client: &Client) -> Result<Option<(u32, BEBlockHeader)>, Error> {
+    pub fn server_tip(&self, client: &Client) -> Result<(u32, BEBlockHeader), Error> {
         let header = client.block_headers_subscribe_raw()?;
         let new_height = header.height as u32;
         let new_header = BEBlockHeader::deserialize(&header.header, self.network.id())?;
+        Ok((new_height, new_header))
+    }
+    pub fn update_cache_if_needed(
+        &self,
+        new_height: u32,
+        new_header: BEBlockHeader,
+    ) -> Result<Option<(u32, BEBlockHeader)>, Error> {
         let do_update = match &self.store.read()?.cache.tip_ {
             None => true,
             Some((current_height, current_header)) => {
@@ -1178,7 +1275,7 @@ impl Tipper {
         };
         if do_update {
             info!("saving in store new tip {:?}", new_height);
-            self.store.write()?.cache.tip_ = Some((new_height, new_header.clone()));
+            self.store.write()?.update_tip(new_height, new_header.clone())?;
             Ok(Some((new_height, new_header)))
         } else {
             Ok(None)
@@ -1311,18 +1408,26 @@ impl Headers {
 struct DownloadTxResult {
     txs: Vec<(BETxid, BETransaction)>,
     unblinds: Vec<(elements::OutPoint, elements::TxOutSecrets)>,
+    is_previous: HashSet<BETxid>,
 }
 
 impl Syncer {
     /// Sync the wallet, return the set of updated accounts
-    pub fn sync(&self, client: &Client) -> Result<Vec<TransactionNotification>, Error> {
-        debug!("start sync");
+    pub fn sync(
+        &self,
+        client: &Client,
+        last_statuses: &mut ScriptStatuses,
+        user_wants_to_sync: &Arc<AtomicBool>,
+    ) -> Result<Vec<TransactionNotification>, Error> {
+        trace!("start sync");
         let start = Instant::now();
 
         let accounts = self.accounts.read().unwrap();
         let mut updated_txs: HashMap<BETxid, TransactionNotification> = HashMap::new();
 
         for account in accounts.values() {
+            let mut new_statuses = ScriptStatuses::new();
+            let cache_statuses = account.status()?;
             let mut history_txs_id = HashSet::<BETxid>::new();
             let mut heights_set = HashSet::new();
             let mut txid_height = HashMap::<BETxid, _>::new();
@@ -1333,41 +1438,71 @@ impl Syncer {
             wallet_chains.shuffle(&mut thread_rng());
             for i in wallet_chains {
                 let is_internal = i == 1;
-                let mut batch_count = 0;
-                loop {
-                    let batch = account.get_script_batch(is_internal, batch_count)?;
-                    // convert the BEScript into bitcoin::Script for electrum-client
-                    let b_scripts =
-                        batch.value.iter().map(|e| e.0.clone().into_bitcoin()).collect::<Vec<_>>();
-                    let result: Vec<Vec<GetHistoryRes>> =
-                        client.batch_script_get_history(b_scripts.iter())?;
-                    if !batch.cached {
-                        scripts.extend(batch.value);
+                let mut count_consecutive_empty = 0;
+                for j in 0.. {
+                    if !user_wants_to_sync.load(Ordering::Relaxed) {
+                        return Err(Error::UserDontWantToSync);
                     }
-                    let max = result
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, v)| !v.is_empty())
-                        .map(|(i, _)| i as u32)
-                        .max();
-                    if let Some(max) = max {
-                        if is_internal {
-                            last_used.internal = max + batch_count * BATCH_SIZE;
-                        } else {
-                            last_used.external = max + batch_count * BATCH_SIZE;
+                    let (cached, path, script) = account.get_script(is_internal, j)?;
+                    if !cached {
+                        scripts.insert(script.clone(), path);
+                    }
+                    let b_script = script.into_bitcoin();
+
+                    match client.script_subscribe(&b_script) {
+                        Ok(Some(status)) => {
+                            // First time: script is subscribed, script contains at least 1 tx
+                            last_statuses.insert(b_script.clone(), status);
                         }
+                        Ok(None) => {
+                            // First time: script is subscribed, script doesn't contain a tx yet
+                            ()
+                        }
+                        Err(gdk_common::electrum_client::Error::AlreadySubscribed(_)) => {
+                            // Second or following iteration
+                            if let Some(status) = client.script_pop(&b_script)? {
+                                // There is an update, new tx for this script
+                                last_statuses.insert(b_script.clone(), status);
+                            } else {
+                                // There are no new transactions since last iteration
+                            }
+                        }
+                        Err(e) => return Err(Error::ClientError(e)),
                     };
-
-                    let flattened: Vec<GetHistoryRes> = result.into_iter().flatten().collect();
-                    trace!("{}/batch({}) {:?}", i, batch_count, flattened.len());
-
-                    if flattened.is_empty() {
-                        break;
+                    match last_statuses.get(&b_script) {
+                        Some(last_status) => {
+                            // Script has a tx
+                            count_consecutive_empty = 0;
+                            if is_internal {
+                                last_used.internal = j;
+                            } else {
+                                last_used.external = j;
+                            }
+                            let cache_status = cache_statuses.get(&b_script);
+                            if Some(last_status) == cache_status {
+                                // No need to check this script since nothing has changed
+                                continue;
+                            }
+                        }
+                        None => {
+                            // Script never had a tx, initially and neither via updates
+                            count_consecutive_empty += 1;
+                            if count_consecutive_empty >= GAP_LIMIT {
+                                break;
+                            } else {
+                                continue;
+                            }
+                        }
                     }
+                    let history = client.script_get_history(&b_script)?;
+
+                    let txid_height_pairs =
+                        history.iter().map(|tx| (BETxid::Bitcoin(tx.tx_hash), tx.height));
+                    let status = account::compute_script_status(txid_height_pairs);
+                    new_statuses.insert(b_script.clone(), status);
 
                     let net = self.network.id();
-
-                    for el in flattened {
+                    for el in history {
                         // el.height = -1 means unconfirmed with unconfirmed parents
                         // el.height =  0 means unconfirmed with confirmed parents
                         // but we threat those tx the same
@@ -1381,8 +1516,6 @@ impl Syncer {
 
                         history_txs_id.insert(el.tx_hash.into_net(net));
                     }
-
-                    batch_count += 1;
                 }
             }
 
@@ -1392,10 +1525,7 @@ impl Syncer {
             let store_read = self.store.read()?;
             let acc_store = store_read.account_cache(account.num())?;
             let store_indexes = acc_store.indexes.clone();
-            let txs_heights_changed = txid_height
-                .iter()
-                .any(|(txid, height)| acc_store.heights.get(txid) != Some(height))
-                || acc_store.heights.keys().any(|txid| txid_height.get(txid).is_none());
+
             drop(acc_store);
             drop(store_read);
 
@@ -1403,13 +1533,15 @@ impl Syncer {
                 || !headers.is_empty()
                 || store_indexes != last_used
                 || !scripts.is_empty()
-                || txs_heights_changed
+                || !txid_height.is_empty()
             {
                 info!(
-                    "There are changes in the store new_txs:{:?} headers:{:?} txid_height:{:?}",
+                    "There are changes in the store new_txs:{:?} headers:{:?} txid_height:{:?} scripts:{:?} store_indexes_changed:{}",
                     new_txs.txs.iter().map(|tx| tx.0).collect::<Vec<_>>(),
                     headers,
-                    txid_height
+                    txid_height,
+                    scripts,
+                    store_indexes != last_used
                 );
                 let mut store_write = self.store.write()?;
                 store_write.cache.headers.extend(headers);
@@ -1421,14 +1553,84 @@ impl Syncer {
                     .extend(new_txs.txs.iter().cloned().map(|(txid, tx)| (txid, tx.into())));
                 acc_store.unblinded.extend(new_txs.unblinds);
 
-                // height map is used for the live list of transactions, since due to reorg or rbf tx
-                // could disappear from the list, we clear the list and keep only the last values returned by the server
-                acc_store.heights.clear();
+                // # Removing conflicting transactions
+                // We have new transactions, but some of them could conflict (spend same outpoint)
+                // with each other or with the ones in the cache. We can't rely on the server to
+                // detect unconfirmed conflicting transactions.
+
+                // ## Remove new transactions conflicting with each other
+                // keeping the one having the greater fee.
+
+                // fetch full transactions and their fee from txids
+                let new_txs_fee: HashMap<BETxid, (BETransaction, u64)> = txid_height
+                    .keys()
+                    .map(|txid| {
+                        let tx = acc_store.all_txs.get(&txid).expect("all txs must be in cache, the new ones in this loop are already inserted in previous extend").clone();
+                        let fee = tx.tx.fee(&acc_store.all_txs, &acc_store.unblinded, &self.network.policy_asset_id().ok()).expect("all txs to compute the fee must be in the cache");
+                        (*txid,(tx.tx, fee))
+                    }
+                ).collect();
+
+                // build a reverse map so that I know which outpoint is spent by more than 1 tx,
+                // meaning the transactions are conflicting
+                let mut outpoints_to_tx: HashMap<BEOutPoint, Vec<BETxid>> = HashMap::new();
+                for (txid, (tx, _)) in new_txs_fee.iter() {
+                    for outpoint in tx.previous_outputs() {
+                        let entry = outpoints_to_tx.entry(outpoint).or_insert(vec![]);
+                        entry.push(*txid);
+                    }
+                }
+
+                // We are going to keep the txids that have no conflicts with other new txs, in case
+                // there are conflicts with another tx, we keep the one with greater fee.
+                txid_height.retain(|txid, _| {
+                    let (tx, fee) =
+                        new_txs_fee.get(txid).expect("new_txs_fee built over txid_height");
+                    for outpoint in tx.previous_outputs() {
+                        let txs_spending_this_outpoint = outpoints_to_tx
+                            .get(&outpoint)
+                            .expect("for sure there is at least current txid");
+                        for other_txid in txs_spending_this_outpoint.iter().filter(|t| *t != txid) {
+                            // if the tx is not found in the new ones, it means it doesn't conflict with the new ones.
+                            if let Some((_, other_fee)) = new_txs_fee.get(other_txid) {
+                                // return false (remove the txid) only if the fee is lower than the other_fee
+                                return fee > other_fee;
+                            }
+                        }
+                    }
+                    true
+                });
+
+                // ## search in existing transactions the ones that use a respent outpoint and
+                // remove them. Here we don't have to bother to check the fee, because we are sure
+                // they happened before.
+                let existing_txids_height: Vec<_> = acc_store.heights.keys().cloned().collect();
+                for txid in existing_txids_height.iter() {
+                    let tx = acc_store.all_txs.get(&txid).expect("all txs must be in cache, the new ones in this loop are already inserted in previous extend").clone();
+                    if tx.tx.previous_outputs().iter().any(|p| outpoints_to_tx.contains_key(p)) {
+                        acc_store.heights.remove(&txid);
+                    }
+                }
+
                 acc_store.heights.extend(txid_height.into_iter());
                 acc_store.scripts.extend(scripts.clone().into_iter().map(|(a, b)| (b, a)));
                 acc_store.paths.extend(scripts.into_iter());
 
+                if acc_store.script_statuses.is_none() {
+                    acc_store.script_statuses = Some(HashMap::new());
+                }
+                acc_store
+                    .script_statuses
+                    .as_mut()
+                    .expect("always some because created if None in previous line")
+                    .extend(new_statuses);
+
                 for tx in new_txs.txs.iter() {
+                    if new_txs.is_previous.contains(&tx.0) {
+                        // This is a previous transaction that we fetched to compute the fee,
+                        // do not emit a notification for it.
+                        continue;
+                    }
                     if let Some(ntf) = updated_txs.get_mut(&tx.0) {
                         // Make sure ntf.subaccounts is ordered and has no duplicates.
                         let subaccount = account.num();
@@ -1547,6 +1749,7 @@ impl Syncer {
     ) -> Result<DownloadTxResult, Error> {
         let mut txs = vec![];
         let mut unblinds = vec![];
+        let mut is_previous = HashSet::new();
 
         let mut txs_in_db =
             self.store.read()?.account_cache(account_num)?.all_txs.keys().cloned().collect();
@@ -1582,9 +1785,14 @@ impl Syncer {
                                 vout,
                             };
 
-                            match self.try_unblind(outpoint, output.clone()) {
+                            let unblinded = unblind_output(
+                                output.clone(),
+                                self.master_blinding.as_ref().unwrap(),
+                                Some(outpoint),
+                            );
+                            match unblinded {
                                 Ok(unblinded) => unblinds.push((outpoint, unblinded)),
-                                Err(_) => info!("{} cannot unblind, ignoring (could be sender messed up with the blinding process)", outpoint),
+                                Err(e) => warn!("{} cannot unblind, ignoring (could be sender messed up with the blinding process) {}", outpoint, e),
                             }
                         }
                     }
@@ -1606,55 +1814,82 @@ impl Syncer {
                 let txs_bytes_downloaded =
                     client.batch_transaction_get_raw(txs_to_download.iter())?;
                 for vec in txs_bytes_downloaded {
-                    let mut tx = BETransaction::deserialize(&vec, self.network.id())?;
-                    tx.strip_witness();
-                    txs.push((tx.txid(), tx));
+                    let tx = BETransaction::deserialize(&vec, self.network.id())?;
+                    let txid = tx.txid();
+                    if !txs.iter().any(|t| &t.0 == &txid) {
+                        is_previous.insert(txid);
+                    }
+                    txs.push((txid, tx));
                 }
             }
             Ok(DownloadTxResult {
                 txs,
                 unblinds,
+                is_previous,
             })
         } else {
             Ok(DownloadTxResult::default())
         }
     }
+}
 
-    pub fn try_unblind(
-        &self,
-        outpoint: elements::OutPoint,
-        output: elements::TxOut,
-    ) -> Result<elements::TxOutSecrets, Error> {
-        match (output.asset, output.value, output.nonce) {
-            (
-                Asset::Confidential(_),
-                confidential::Value::Confidential(_),
-                Nonce::Confidential(_),
-            ) => {
-                let master_blinding = self.master_blinding.as_ref().unwrap();
+fn fetch_available_currencies(
+    agent: &ureq::Agent,
+    url: &str,
+) -> Result<HashMap<String, Vec<Currency>>, Error> {
+    #[derive(serde::Deserialize)]
+    struct ExchangeInfos {
+        pairs: Vec<(Currency, Currency)>,
+    }
 
-                let script = output.script_pubkey.clone();
-                let blinding_key = asset_blinding_key_to_ec_private_key(master_blinding, &script);
-                let txout_secrets = output.unblind(&EC, blinding_key)?;
-                info!(
-                    "Unblinded outpoint:{} asset:{} value:{}",
-                    outpoint,
-                    txout_secrets.asset.to_hex(),
-                    txout_secrets.value
-                );
+    let endpoint = format!("{url}/v0/venues");
 
-                Ok(txout_secrets)
+    let response = agent.get(&endpoint).call()?.into_json::<HashMap<String, ExchangeInfos>>()?;
+
+    let map = response.into_iter().map(|(exchange, infos)| {
+        let currencies = infos.pairs.into_iter().map(|(first, second)| {
+            // Either the first or the second currency in the pair must be
+            // fiat (but not both).
+            if !(first.is_fiat() ^ second.is_fiat()) {
+                panic!("Was expecting one currency in the pair to be Bitcoin, got {}-{} instead", first, second);
             }
-            (Asset::Explicit(asset_id), confidential::Value::Explicit(satoshi), _) => {
-                Ok(elements::TxOutSecrets {
-                    asset: asset_id,
-                    value: satoshi,
-                    asset_bf: elements::confidential::AssetBlindingFactor::zero(),
-                    value_bf: elements::confidential::ValueBlindingFactor::zero(),
-                })
-            }
-            _ => Err(Error::Generic("Unexpected asset/value/nonce".into())),
+            if first.is_fiat() { first } else { second }
+        }).collect::<Vec<Currency>>();
+
+        (exchange, currencies)
+    }).collect();
+
+    Ok(map)
+}
+
+fn unblind_output(
+    output: elements::TxOut,
+    master_blinding: &MasterBlindingKey,
+    outpoint: Option<elements::OutPoint>,
+) -> Result<elements::TxOutSecrets, Error> {
+    match (output.asset, output.value, output.nonce) {
+        (Asset::Confidential(_), confidential::Value::Confidential(_), Nonce::Confidential(_)) => {
+            let script = output.script_pubkey.clone();
+            let blinding_key = asset_blinding_key_to_ec_private_key(master_blinding, &script);
+            let txout_secrets = output.unblind(&EC, blinding_key)?;
+            info!(
+                "Unblinded outpoint:{} asset:{} value:{}",
+                outpoint.map(|out| out.to_string()).unwrap_or_default(),
+                txout_secrets.asset.to_hex(),
+                txout_secrets.value
+            );
+
+            Ok(txout_secrets)
         }
+        (Asset::Explicit(asset_id), confidential::Value::Explicit(satoshi), _) => {
+            Ok(elements::TxOutSecrets {
+                asset: asset_id,
+                value: satoshi,
+                asset_bf: elements::confidential::AssetBlindingFactor::zero(),
+                value_bf: elements::confidential::ValueBlindingFactor::zero(),
+            })
+        }
+        _ => Err(Error::Generic("Unexpected asset/value/nonce".into())),
     }
 }
 
@@ -1667,6 +1902,28 @@ fn wait_or_close(user_wants_to_sync: &Arc<AtomicBool>, interval: u32) -> bool {
         thread::sleep(Duration::from_millis(500));
     }
     false
+}
+
+// Some pin_data encrypt the bare mnemonic, not a json.
+// If we cannot deserialize the plaintext into a json,
+// we attempt to deserialize it into a bare mnemonic.
+// For old pin_data that does have the hmac,
+// it could happen that the decryption is successfully even with a wrong key.
+// However the chance that the pin_data does not have a hmac,
+// decryption is successful with a wrong key and
+// the plaintext it's a valid utf8 is practically negligible,
+// so here we return an InvalidPin error.
+fn bare_mnemonic_from_utf8(decrypted: &[u8]) -> Result<Credentials, Error> {
+    let mnemonic = std::str::from_utf8(&decrypted)
+        .map_err(|_| Error::PinClient(gdk_pin_client::Error::InvalidPin))?
+        .to_string();
+    if mnemonic.chars().any(|c| !c.is_ascii_alphabetic() && !c.is_whitespace()) {
+        return Err(Error::PinClient(gdk_pin_client::Error::InvalidPin));
+    }
+    Ok(Credentials {
+        mnemonic,
+        bip39_passphrase: "".to_string(),
+    })
 }
 
 #[cfg(feature = "testing")]
@@ -1690,5 +1947,26 @@ mod test {
         let (master_xprv, _, _) =
             keys_from_credentials(&credentials, bitcoin::Network::Bitcoin).unwrap();
         assert_eq!(master_xprv.to_string(), "xprv9s21ZrQH143K3h3fDYiay8mocZ3afhfULfb5GX8kCBdno77K4HiA15Tg23wpbeF1pLfs1c5SPmYHrEpTuuRhxMwvKDwqdKiGJS9XFKzUsAF");
+    }
+
+    #[test]
+    fn fetch_available_currencies() {
+        let map = super::fetch_available_currencies(
+            &ureq::Agent::new(),
+            "https://green-bitcoin-testnet.blockstream.com/prices",
+        )
+        .unwrap();
+
+        assert!(map.len() > 0);
+    }
+
+    #[test]
+    fn test_bare_mnemonic() {
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        assert!(bare_mnemonic_from_utf8(&mnemonic.as_bytes()).is_ok());
+        assert!(bare_mnemonic_from_utf8(&format!("{} ", mnemonic).as_bytes()).is_ok());
+        assert!(bare_mnemonic_from_utf8(&format!("{}\n", mnemonic).as_bytes()).is_ok());
+        assert!(bare_mnemonic_from_utf8(&format!("{}.", mnemonic).as_bytes()).is_err());
+        assert!(bare_mnemonic_from_utf8(b"\x00\x9f\x92\x96").is_err());
     }
 }

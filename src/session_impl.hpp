@@ -2,12 +2,12 @@
 #define GDK_SESSION_IMPL_HPP
 
 #pragma once
+#include <atomic>
 #include <mutex>
 #include <set>
 #include <thread>
 
 #include "amount.hpp"
-#include "boost_wrapper.hpp"
 #include "ga_wally.hpp"
 #include "network_parameters.hpp"
 
@@ -20,6 +20,7 @@ namespace sdk {
     class user_pubkeys;
     class signer;
     struct tor_controller;
+    struct io_context_and_guard;
 
     class session_impl {
     public:
@@ -75,7 +76,7 @@ namespace sdk {
 
         // Make an http request to an arbitrary host governed by 'params'.
         virtual nlohmann::json http_request(nlohmann::json params);
-        virtual nlohmann::json refresh_assets(const nlohmann::json& params);
+        virtual void refresh_assets(const nlohmann::json& params);
         nlohmann::json get_assets(const nlohmann::json& params);
         virtual nlohmann::json validate_asset_domain_name(const nlohmann::json& params) = 0;
 
@@ -122,14 +123,14 @@ namespace sdk {
         virtual std::vector<uint32_t> get_subaccount_root_path(uint32_t subaccount) = 0;
         virtual std::vector<uint32_t> get_subaccount_full_path(uint32_t subaccount, uint32_t pointer, bool is_internal)
             = 0;
-        virtual nlohmann::json get_subaccount_xpub(uint32_t subaccount);
+        virtual std::string get_subaccount_type(uint32_t subaccount);
 
         virtual nlohmann::json get_available_currencies() const = 0;
 
         virtual bool is_rbf_enabled() const = 0;
         virtual bool is_watch_only() const = 0;
         virtual void ensure_full_session() = 0;
-        virtual nlohmann::json get_settings() = 0;
+        virtual nlohmann::json get_settings() const = 0;
         virtual nlohmann::json get_post_login_data() = 0;
         virtual void change_settings(const nlohmann::json& settings) = 0;
 
@@ -163,6 +164,7 @@ namespace sdk {
         virtual nlohmann::json cancel_twofactor_reset(const nlohmann::json& twofactor_data) = 0;
 
         virtual nlohmann::json encrypt_with_pin(const nlohmann::json& details) = 0;
+        virtual nlohmann::json decrypt_with_pin(const nlohmann::json& details);
 
         virtual bool encache_blinding_data(const std::string& pubkey_hex, const std::string& script_hex,
             const std::string& nonce_hex, const std::string& blinding_pubkey_hex);
@@ -170,6 +172,7 @@ namespace sdk {
             const uint32_t branch, const uint32_t pointer, const uint32_t subtype, const uint32_t script_type);
         virtual void encache_new_scriptpubkeys(const uint32_t subaccount);
         virtual nlohmann::json get_scriptpubkey_data(byte_span_t scriptpubkey);
+        virtual nlohmann::json get_address_data(const nlohmann::json& details);
         virtual nlohmann::json psbt_get_details(const nlohmann::json& details);
         virtual void upload_confidential_addresses(
             uint32_t subaccount, const std::vector<std::string>& confidential_addresses)
@@ -178,12 +181,12 @@ namespace sdk {
         virtual wally_tx_ptr get_raw_transaction_details(const std::string& txhash_hex) const = 0;
         virtual nlohmann::json get_transaction_details(const std::string& txhash_hex) const = 0;
 
-        virtual nlohmann::json create_transaction(const nlohmann::json& details) = 0;
-        virtual nlohmann::json user_sign_transaction(const nlohmann::json& details) = 0;
+        virtual void create_transaction(nlohmann::json& details);
+        virtual nlohmann::json user_sign_transaction(const nlohmann::json& details);
         virtual nlohmann::json service_sign_transaction(
             const nlohmann::json& details, const nlohmann::json& twofactor_data)
             = 0;
-        virtual nlohmann::json psbt_sign(const nlohmann::json& details) = 0;
+        virtual nlohmann::json psbt_sign(const nlohmann::json& details);
         virtual nlohmann::json send_transaction(const nlohmann::json& details, const nlohmann::json& twofactor_data)
             = 0;
         virtual std::string broadcast_transaction(const std::string& tx_hex) = 0;
@@ -209,7 +212,7 @@ namespace sdk {
         virtual amount get_min_fee_rate() const = 0;
         virtual amount get_default_fee_rate() const = 0;
         virtual uint32_t get_block_height() const = 0;
-        virtual amount get_dust_threshold() const = 0;
+        amount get_dust_threshold(const std::string& asset_id) const;
         virtual nlohmann::json get_spending_limits() const = 0;
         virtual bool is_spending_limits_decrease(const nlohmann::json& limit_details) = 0;
 
@@ -236,8 +239,6 @@ namespace sdk {
         virtual std::vector<unsigned char> output_script_from_utxo(const nlohmann::json& utxo);
         virtual std::vector<pub_key_t> pubkeys_from_utxo(const nlohmann::json& utxo);
 
-        virtual nlohmann::json gl_call(const char* method, const nlohmann::json& params);
-
     protected:
         // Locking per-session assumes the following thread safety model:
         // 1) Implementations noted "idempotent" can be called from multiple
@@ -262,8 +263,8 @@ namespace sdk {
 
         // Immutable upon construction
         const network_parameters m_net_params;
-        boost::asio::io_context m_io;
-        boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_work_guard;
+        std::unique_ptr<io_context_and_guard> m_io;
+
         std::thread m_run_thread; // Runs the asio context
         const std::string m_user_proxy;
         std::shared_ptr<tor_controller> m_tor_ctrl;

@@ -360,6 +360,10 @@ public class Session {
         return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_encrypt_with_pin)
     }
 
+    public func decryptWithPin(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_decrypt_with_pin)
+    }
+
     public func disableAllPinLogins() throws -> Void {
         try callWrapper(fun: GA_disable_all_pin_logins(session))
     }
@@ -376,8 +380,20 @@ public class Session {
         return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_create_transaction)
     }
 
+    public func blindTransaction(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_blind_transaction)
+    }
+
     public func signTransaction(details: [String: Any]) throws -> TwoFactorCall {
         return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_sign_transaction)
+    }
+
+    public func createSwapTransaction(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_create_swap_transaction)
+    }
+
+    public func completeSwapTransaction(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_complete_swap_transaction)
     }
 
     public func signPsbt(details: [String: Any]) throws -> TwoFactorCall {
@@ -400,6 +416,10 @@ public class Session {
         }
         return String(cString: buff!)
      }
+
+    public func signMessage(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_sign_message)
+    }
 
     public func sendNlocktimes() throws -> Void {
         try callWrapper(fun: GA_send_nlocktimes(session))
@@ -448,6 +468,14 @@ public class Session {
 
     public func setTwoFactorLimit(details: [String: Any]) throws -> TwoFactorCall {
         return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_twofactor_change_limits)
+    }
+
+    public func bcurEncode(details: [String: Any]) throws -> TwoFactorCall{
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_bcur_encode)
+    }
+
+    public func bcurDecode(details: [String: Any]) throws -> TwoFactorCall{
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_bcur_decode)
     }
 
     public func setCSVTime(details: [String: Any]) throws -> TwoFactorCall {
@@ -502,8 +530,12 @@ public class Session {
         return try jsonFuncToJsonWrapper(input: params, fun: GA_http_request)
     }
 
-    public func refreshAssets(params: [String: Any]) throws -> [String: Any]? {
-        return try jsonFuncToJsonWrapper(input: params, fun: GA_refresh_assets)
+    public func refreshAssets(params: [String: Any]) throws {
+        let paramsJson: OpaquePointer = try convertDictToJSON(dict: params)
+        defer {
+            GA_destroy_json(paramsJson)
+        }
+        try callWrapper(fun: GA_refresh_assets(session, paramsJson))
     }
 
     public func getAssets(params: [String: Any]) throws -> [String: Any]? {
@@ -512,6 +544,10 @@ public class Session {
 
     public func validateAssetDomainName(params: [String: Any]) throws -> [String: Any]? {
         return try jsonFuncToJsonWrapper(input: params, fun: GA_validate_asset_domain_name)
+    }
+
+    public func validate(details: [String: Any]) throws -> TwoFactorCall {
+        return try jsonFuncToCallHandlerWrapper(input: details, fun: GA_validate)
     }
 }
 

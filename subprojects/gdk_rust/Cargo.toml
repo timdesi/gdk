@@ -3,10 +3,12 @@
 members = [
     "gdk_common",
     "gdk_electrum",
+    "gdk_pin_client",
     "gdk_registry",
     "gdk_rust",
 ]
 
+exclude = [ "gdk_test" ]
 
 [profile.release]
 lto = true
@@ -25,3 +27,4 @@ incremental = false
 debug = true
 debug-assertions = true
 panic = 'abort'
+lto = true

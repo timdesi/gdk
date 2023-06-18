@@ -12,20 +12,24 @@
 #ifndef WIN32
 #include <unistd.h>
 #endif
-
 #include "session.hpp"
+#include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/split.hpp>
+#include <boost/format.hpp>
+#include <boost/lexical_cast.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
 
 #include "autobahn_wrapper.hpp"
-#include "boost_wrapper.hpp"
 #include "exception.hpp"
 #include "ga_cache.hpp"
 #include "ga_session.hpp"
 #include "ga_strings.hpp"
 #include "ga_tx.hpp"
-#include "http_client.hpp"
 #include "logging.hpp"
 #include "memory.hpp"
 #include "signer.hpp"
+#include "threading.hpp"
 #include "transaction_utils.hpp"
 #include "utils.hpp"
 #include "version.h"
@@ -35,7 +39,6 @@
 #define TX_CACHE_LEVEL log_level::debug
 
 using namespace std::literals;
-namespace asio = boost::asio;
 
 namespace ga {
 namespace sdk {
@@ -46,6 +49,7 @@ namespace sdk {
 
         static const std::string MASKED_GAUTH_SEED("***");
         static const uint32_t DEFAULT_MIN_FEE = 1000; // 1 satoshi/byte
+        static const uint32_t DEFAULT_MIN_FEE_LIQUID = 100; // 0.1 satoshi/byte
         static const uint32_t NUM_FEE_ESTIMATES = 25; // Min fee followed by blocks 1-24
 
         static const std::string ZEROS(64, '0');
@@ -192,11 +196,13 @@ namespace sdk {
             nlohmann::json clean_notifications_settings({
                 { "email_incoming", false },
                 { "email_outgoing", false },
+                { "email_login", false },
             });
             clean_notifications_settings.update(clean["notifications_settings"]);
             clean["notifications_settings"] = clean_notifications_settings;
             GDK_RUNTIME_ASSERT(clean["notifications_settings"]["email_incoming"].is_boolean());
             GDK_RUNTIME_ASSERT(clean["notifications_settings"]["email_outgoing"].is_boolean());
+            GDK_RUNTIME_ASSERT(clean["notifications_settings"]["email_login"].is_boolean());
 
             // Make sure the default block target is one of [3, 12, or 24]
             uint32_t required_num_blocks = clean["required_num_blocks"];
@@ -228,6 +234,7 @@ namespace sdk {
         static inline void check_tx_memo(const std::string& memo)
         {
             GDK_RUNTIME_ASSERT_MSG(memo.size() <= 1024, "Transaction memo too long");
+            GDK_RUNTIME_ASSERT_MSG(is_valid_utf8(memo), "Transaction memo not a valid utf-8 string");
         }
 
         static nlohmann::json get_spv_params(const network_parameters& net_params, const nlohmann::json& proxy_settings)
@@ -258,7 +265,7 @@ namespace sdk {
         , m_blob()
         , m_blob_hmac()
         , m_blob_outdated(false)
-        , m_min_fee_rate(DEFAULT_MIN_FEE)
+        , m_min_fee_rate(m_net_params.is_liquid() ? DEFAULT_MIN_FEE_LIQUID : DEFAULT_MIN_FEE)
         , m_earliest_block_time(0)
         , m_next_subaccount(0)
         , m_fee_estimates_ts(std::chrono::system_clock::now())
@@ -383,7 +390,7 @@ namespace sdk {
 
         const auto challenge_hash = uint256_to_base256(challenge);
 
-        return { sig_to_der_hex(m_signer->sign_hash(path, challenge_hash)), b2h(path_bytes) };
+        return { sig_only_to_der_hex(m_signer->sign_hash(path, challenge_hash)), b2h(path_bytes) };
     }
 
     void ga_session::set_fee_estimates(session_impl::locker_t& locker, const nlohmann::json& fee_estimates)
@@ -576,12 +583,15 @@ namespace sdk {
         m_earliest_block_time = m_login_data["earliest_key_creation_time"];
 
         // Compute wallet identifier for callers to use if they wish.
-        const auto wallet_hash_id
-            = get_wallet_hash_id(m_net_params, m_login_data["chain_code"], m_login_data["public_key"]);
+        const auto hash_ids = get_wallet_hash_ids(m_net_params, m_login_data["chain_code"], m_login_data["public_key"]);
+        auto& wallet_hash_id = hash_ids["wallet_hash_id"];
+        auto& xpub_hash_id = hash_ids["xpub_hash_id"];
         if (!is_initial_login) {
             GDK_RUNTIME_ASSERT(login_data.at("wallet_hash_id") == wallet_hash_id);
+            GDK_RUNTIME_ASSERT(login_data.at("xpub_hash_id") == xpub_hash_id);
         }
-        m_login_data["wallet_hash_id"] = wallet_hash_id;
+        m_login_data["wallet_hash_id"] = std::move(wallet_hash_id);
+        m_login_data["xpub_hash_id"] = std::move(xpub_hash_id);
 
         // Check that csv blocks used are recoverable and provided by the server
         const auto net_csv_buckets = m_net_params.csv_buckets();
@@ -811,6 +821,14 @@ namespace sdk {
             remove_cached_utxos(subaccounts);
             emit_notification({ { "event", "transaction" }, { "transaction", std::move(details) } }, false);
         });
+    }
+
+    void ga_session::purge_tx_notification(const std::string& txhash_hex)
+    {
+        auto&& filter = [&txhash_hex](const auto& ntf) -> bool { return ntf.find(txhash_hex) != std::string::npos; };
+        locker_t locker(m_mutex);
+        m_tx_notifications.erase(
+            std::remove_if(m_tx_notifications.begin(), m_tx_notifications.end(), filter), m_tx_notifications.end());
     }
 
     void ga_session::on_new_block(nlohmann::json details, bool is_relogin)
@@ -1089,16 +1107,16 @@ namespace sdk {
             std::string db_hmac;
             if (m_watch_only) {
                 m_cache->get_key_value("client_blob_hmac", { [&db_hmac](const auto& db_blob) {
-                    if (db_blob) {
+                    if (db_blob.has_value()) {
                         db_hmac.assign(db_blob->begin(), db_blob->end());
                     }
                 } });
             }
             m_cache->get_key_value("client_blob", { [this, &db_hmac, &server_hmac](const auto& db_blob) {
-                if (db_blob) {
-                    GDK_RUNTIME_ASSERT(m_watch_only || m_blob_hmac_key != boost::none);
+                if (db_blob.has_value()) {
+                    GDK_RUNTIME_ASSERT(m_watch_only || m_blob_hmac_key.has_value());
                     if (!m_watch_only) {
-                        db_hmac = client_blob::compute_hmac(m_blob_hmac_key.get(), *db_blob);
+                        db_hmac = client_blob::compute_hmac(m_blob_hmac_key.value(), *db_blob);
                     }
                     if (db_hmac == server_hmac) {
                         // Cached blob is current, load it
@@ -1135,8 +1153,8 @@ namespace sdk {
     {
         // Generate our encrypted blob + hmac, store on the server, cache locally
         GDK_RUNTIME_ASSERT(locker.owns_lock());
-        GDK_RUNTIME_ASSERT(m_blob_aes_key != boost::none);
-        GDK_RUNTIME_ASSERT(m_blob_hmac_key != boost::none);
+        GDK_RUNTIME_ASSERT(m_blob_aes_key.has_value());
+        GDK_RUNTIME_ASSERT(m_blob_hmac_key.has_value());
 
         const auto saved{ m_blob.save(*m_blob_aes_key, *m_blob_hmac_key) };
         auto blob_b64{ base64_string_from_bytes(saved.first) };
@@ -1166,11 +1184,11 @@ namespace sdk {
         m_cache->save_db();
     }
 
-    template <typename T> static bool set_optional_member(boost::optional<T>& member, T&& new_value)
+    template <typename T> static bool set_optional_member(std::optional<T>& member, T&& new_value)
     {
         // Allow changing the value only if it is not already set
-        GDK_RUNTIME_ASSERT(member == boost::none || member == new_value);
-        if (member == boost::none) {
+        GDK_RUNTIME_ASSERT(!member.has_value() || member == new_value);
+        if (!member.has_value()) {
             member.emplace(std::move(new_value));
             return true;
         }
@@ -1201,7 +1219,7 @@ namespace sdk {
             set_optional_member(m_blob_aes_key, sha256(tmp_span.subspan(SHA256_LEN)));
             set_optional_member(m_blob_hmac_key, make_byte_array<SHA256_LEN>(tmp_span.subspan(SHA256_LEN, SHA256_LEN)));
         }
-        m_cache->load_db(m_local_encryption_key.get(), signer);
+        m_cache->load_db(m_local_encryption_key.value(), signer);
         // Save the cache in case we carried forward data from a previous version
         m_cache->save_db(); // No-op if unchanged
         load_signer_xpubs(locker, signer);
@@ -1227,11 +1245,11 @@ namespace sdk {
             m_signer.reset();
             remove_cached_utxos(std::vector<uint32_t>());
             swap_with_default(m_login_data);
-            m_local_encryption_key = boost::none;
+            m_local_encryption_key.reset();
             m_blob.reset();
             m_blob_hmac.clear();
-            m_blob_aes_key = boost::none;
-            m_blob_hmac_key = boost::none;
+            m_blob_aes_key.reset();
+            m_blob_hmac_key.reset();
             m_blob_outdated = false; // Blob will be reloaded if needed when login succeeds
             swap_with_default(m_limits_data);
             swap_with_default(m_twofactor_config);
@@ -1252,13 +1270,13 @@ namespace sdk {
         }
     }
 
-    nlohmann::json ga_session::get_settings()
+    nlohmann::json ga_session::get_settings() const
     {
         locker_t locker(m_mutex);
         return get_settings(locker);
     }
 
-    nlohmann::json ga_session::get_settings(session_impl::locker_t& locker)
+    nlohmann::json ga_session::get_settings(session_impl::locker_t& locker) const
     {
         GDK_RUNTIME_ASSERT(locker.owns_lock());
 
@@ -1278,7 +1296,8 @@ namespace sdk {
 
     nlohmann::json ga_session::get_post_login_data()
     {
-        return nlohmann::json{ { "wallet_hash_id", m_login_data["wallet_hash_id"] } };
+        return { { "wallet_hash_id", m_login_data["wallet_hash_id"] },
+            { "xpub_hash_id", m_login_data["xpub_hash_id"] } };
     }
 
     void ga_session::change_settings(const nlohmann::json& settings)
@@ -1307,8 +1326,8 @@ namespace sdk {
     // For historic reasons certain settings have been put under appearance and the server
     // still expects to find them there, but logically they don't belong there at all so
     // a more consistent scheme is presented via the gdk
-    void ga_session::remap_appearance_settings(
-        session_impl::locker_t& locker, const nlohmann::json& src_json, nlohmann::json& dst_json, bool from_settings)
+    void ga_session::remap_appearance_settings(session_impl::locker_t& locker, const nlohmann::json& src_json,
+        nlohmann::json& dst_json, bool from_settings) const
     {
         GDK_RUNTIME_ASSERT(locker.owns_lock());
 
@@ -1330,12 +1349,12 @@ namespace sdk {
         remap_appearance_setting("required_num_blocks", "required_num_blocks");
     }
 
-    nlohmann::json ga_session::credentials_from_pin_data(const nlohmann::json& pin_data)
+    nlohmann::json ga_session::decrypt_with_pin_impl(const nlohmann::json& details, bool is_login)
     {
         try {
             // FIXME: clear password after use
-            const auto& pin = pin_data.at("pin");
-            const auto& data = pin_data.at("pin_data");
+            const auto& pin = details.at("pin");
+            const auto& data = details.at("pin_data");
             const auto password = get_pin_password(pin, data.at("pin_identifier"));
             const std::string salt = data.at("salt");
             const auto key = pbkdf2_hmac_sha512_256(password, ustring_span(salt));
@@ -1344,10 +1363,18 @@ namespace sdk {
             const auto plaintext = aes_cbc_decrypt_from_hex(key, data.at("encrypted_data"));
             return nlohmann::json::parse(plaintext.begin(), plaintext.end());
         } catch (const autobahn::call_error& e) {
-            GDK_LOG_SEV(log_level::warning) << "pin login failed:" << e.what();
-            reset_all_session_data(false);
+            GDK_LOG_SEV(log_level::warning) << "pin " << (is_login ? "login " : "") << "failed: " << e.what();
+            if (is_login) {
+                reset_all_session_data(false);
+            }
             throw login_error(res::id_invalid_pin);
         }
+    }
+
+    nlohmann::json ga_session::credentials_from_pin_data(const nlohmann::json& details)
+    {
+        constexpr bool is_login = true;
+        return decrypt_with_pin_impl(details, is_login);
     }
 
     // Idempotent
@@ -1414,7 +1441,7 @@ namespace sdk {
             get_cached_client_blob(server_hmac);
         }
 
-        if (is_blob_on_server && m_blob_aes_key != boost::none) {
+        if (is_blob_on_server && m_blob_aes_key.has_value()) {
             // The server has a blob for this wallet. If we haven't got an
             // up to date copy of it loaded yet, do so.
             if (!is_initial_login && m_blob_hmac != server_hmac) {
@@ -1456,7 +1483,7 @@ namespace sdk {
         auto ret = on_post_login(locker, login_data, root_bip32_xpub, watch_only, is_initial_login);
 
         // Note that locker is unlocked at this point
-        if (m_blob_aes_key != boost::none) {
+        if (m_blob_aes_key.has_value()) {
             const auto subaccount_pointers = get_subaccount_pointers();
             std::vector<std::string> bip32_xpubs;
             bip32_xpubs.reserve(subaccount_pointers.size());
@@ -1577,7 +1604,7 @@ namespace sdk {
     nlohmann::json ga_session::convert_fiat_cents(session_impl::locker_t& locker, amount::value_type fiat_cents) const
     {
         GDK_RUNTIME_ASSERT(locker.owns_lock());
-        return amount::convert_fiat_cents(fiat_cents, m_fiat_currency, m_fiat_rate);
+        return amount::convert_fiat_cents(fiat_cents, m_fiat_currency);
     }
 
     void ga_session::ensure_full_session()
@@ -1600,7 +1627,7 @@ namespace sdk {
         }
 
         locker_t locker(m_mutex);
-        if (m_blob_aes_key == boost::none) {
+        if (!m_blob_aes_key.has_value()) {
             // The wallet doesn't have a client blob: can only happen
             // when a 2FA reset is in progress and the wallet was
             // created before client blobs were enabled.
@@ -1624,7 +1651,7 @@ namespace sdk {
             // Derive the username/password to use, encrypt the client blob key for upload
             const auto entropy = get_wo_entropy(username, password);
             u_p = get_wo_credentials(entropy);
-            wo_blob_key_hex = encrypt_wo_blob_key(entropy, m_blob_aes_key.get());
+            wo_blob_key_hex = encrypt_wo_blob_key(entropy, m_blob_aes_key.value());
         }
         locker.unlock();
         return wamp_cast<bool>(m_wamp->call("addressbook.sync_custom", u_p.first, u_p.second, wo_blob_key_hex));
@@ -1633,7 +1660,7 @@ namespace sdk {
     std::string ga_session::get_wo_username()
     {
         locker_t locker(m_mutex);
-        if (m_blob_aes_key != boost::none) {
+        if (m_blob_aes_key.has_value()) {
             // Client blob watch only; return from the client blob,
             // since the server doesn't know our real username.
             const auto username = m_blob.get_wo_username();
@@ -1663,7 +1690,9 @@ namespace sdk {
         subaccounts.reserve(m_subaccounts.size());
 
         for (const auto& sa : m_subaccounts) {
-            subaccounts.emplace_back(sa.second);
+            auto subaccount = sa.second;
+            subaccount.erase("user_path");
+            subaccounts.emplace_back(std::move(subaccount));
         }
         return nlohmann::json(std::move(subaccounts));
     }
@@ -1731,10 +1760,10 @@ namespace sdk {
 
         // FIXME: replace "pointer" with "subaccount"; pointer should only be used
         // for the final path element in a derivation
-        const auto policy_asset = m_net_params.is_liquid() ? m_net_params.policy_asset() : std::string("btc");
         nlohmann::json sa = { { "name", name }, { "pointer", subaccount }, { "receiving_id", receiving_id },
             { "type", type }, { "recovery_pub_key", recovery_pub_key }, { "recovery_chain_code", recovery_chain_code },
-            { "recovery_xpub", recovery_xpub }, { "required_ca", required_ca }, { "hidden", is_hidden } };
+            { "recovery_xpub", recovery_xpub }, { "required_ca", required_ca }, { "hidden", is_hidden },
+            { "user_path", ga_user_pubkeys::get_ga_subaccount_root_path(subaccount) } };
         m_subaccounts[subaccount] = sa;
 
         if (subaccount != 0) {
@@ -1856,9 +1885,9 @@ namespace sdk {
         GDK_RUNTIME_ASSERT(locker.owns_lock());
         GDK_RUNTIME_ASSERT(signer.get());
         m_cache->get_key_value("xpubs", { [&signer](const auto& db_blob) {
-            if (db_blob) {
+            if (db_blob.has_value()) {
                 try {
-                    auto cached = nlohmann::json::from_msgpack(db_blob.get().begin(), db_blob.get().end());
+                    auto cached = nlohmann::json::from_msgpack(db_blob.value().begin(), db_blob.value().end());
                     for (auto& item : cached.items()) {
                         // Inverted: See encache_signer_xpubs()
                         signer->cache_bip32_xpub(item.value(), item.key());
@@ -1901,13 +1930,14 @@ namespace sdk {
 
         m_fiat_source = exchange;
         m_fiat_currency = currency;
-        update_fiat_rate(locker, fiat_rate.get_value_or(std::string()));
+        update_fiat_rate(locker, fiat_rate.value_or(std::string()));
     }
 
-    static void remove_utxo_proofs(nlohmann::json& utxo, bool mark_unblinded)
+    static void remove_utxo_proofs(nlohmann::json& utxo, bool mark_unconfidential)
     {
-        if (mark_unblinded) {
-            utxo["confidential"] = true;
+        if (mark_unconfidential) {
+            utxo["is_confidential"] = false;
+            utxo["is_blinded"] = true;
             utxo.erase("error");
         }
         utxo.erase("range_proof");
@@ -1924,10 +1954,10 @@ namespace sdk {
             utxo["satoshi"] = value;
             utxo["assetblinder"] = ZEROS;
             utxo["amountblinder"] = ZEROS;
-            const auto asset_tag = h2b(utxo.value("asset_tag", m_net_params.policy_asset()));
-            GDK_RUNTIME_ASSERT(asset_tag[0] == 0x1);
+            const auto asset_tag = h2b(utxo.at("asset_tag"));
+            GDK_RUNTIME_ASSERT(asset_tag.at(0) == 0x1);
             utxo["asset_id"] = b2h_rev(gsl::make_span(asset_tag).subspan(1));
-            utxo["confidential"] = false;
+            utxo["is_blinded"] = false;
             return false; // Cache not updated
         }
 
@@ -1956,13 +1986,13 @@ namespace sdk {
             const auto cached = m_cache->get_liquid_output(h2b(txhash), pt_idx);
             if (!cached.empty()) {
                 utxo.update(cached.begin(), cached.end());
-                constexpr bool mark_unblinded = true;
-                remove_utxo_proofs(utxo, mark_unblinded);
+                constexpr bool mark_unconfidential = true;
+                remove_utxo_proofs(utxo, mark_unconfidential);
                 if (has_address) {
-                    // We should now be able to blind the address
+                    // We should now be able to make the address confidential
                     const auto blinding_pubkey = m_cache->get_liquid_blinding_pubkey(script);
                     GDK_RUNTIME_ASSERT(!blinding_pubkey.empty());
-                    blind_address(m_net_params, utxo, b2h(blinding_pubkey));
+                    confidentialize_address(m_net_params, utxo, b2h(blinding_pubkey));
                 }
 
                 return false; // Cache not updated
@@ -1986,13 +2016,13 @@ namespace sdk {
         unblind_t unblinded;
         try {
             unblinded = asset_unblind_with_nonce(nonce, rangeproof, commitment, script, asset_tag);
-        } catch (const std::exception& ex) {
+        } catch (const std::exception&) {
             nonce = get_alternate_blinding_nonce(locker, utxo, nonce_commitment);
             if (!nonce.empty()) {
                 // Try the alternate nonce
                 try {
                     unblinded = asset_unblind_with_nonce(nonce, rangeproof, commitment, script, asset_tag);
-                } catch (const std::exception& ex) {
+                } catch (const std::exception&) {
                     nonce.clear();
                 }
             }
@@ -2008,8 +2038,8 @@ namespace sdk {
         utxo["assetblinder"] = b2h_rev(std::get<2>(unblinded));
         utxo["amountblinder"] = b2h_rev(std::get<1>(unblinded));
         utxo["asset_id"] = b2h_rev(std::get<0>(unblinded));
-        constexpr bool mark_unblinded = true;
-        remove_utxo_proofs(utxo, mark_unblinded);
+        constexpr bool mark_unconfidential = true;
+        remove_utxo_proofs(utxo, mark_unconfidential);
 
         bool updated_blinding_cache = false;
         if (!txhash.empty()) {
@@ -2018,10 +2048,10 @@ namespace sdk {
         }
 
         if (has_address) {
-            // We should now be able to blind the address
+            // We should now be able to make the address confidential
             const auto blinding_pubkey = m_cache->get_liquid_blinding_pubkey(script);
             GDK_RUNTIME_ASSERT(!blinding_pubkey.empty());
-            blind_address(m_net_params, utxo, b2h(blinding_pubkey));
+            confidentialize_address(m_net_params, utxo, b2h(blinding_pubkey));
         }
 
         return updated_blinding_cache;
@@ -2106,8 +2136,8 @@ namespace sdk {
                         if (json_get_value(utxo, "is_relevant", true)) {
                             updated_blinding_cache |= unblind_utxo(locker, utxo, for_txhash, missing);
                         } else {
-                            constexpr bool mark_unblinded = false;
-                            remove_utxo_proofs(utxo, mark_unblinded);
+                            constexpr bool mark_unconfidential = false;
+                            remove_utxo_proofs(utxo, mark_unconfidential);
                         }
                     } else {
                         amount::value_type value;
@@ -2170,8 +2200,6 @@ namespace sdk {
             tx["transaction_weight"] = tx_vsize * 4;
             // fee_rate is in satoshi/kb, with the best integer accuracy we have
             tx["fee_rate"] = tx.at("fee").get<amount::value_type>() * 1000 / tx_vsize;
-            tx["user_signed"] = true;
-            tx["server_signed"] = true;
 
             // Clean up and categorize the endpoints. For liquid, this populates
             // 'missing' if any UTXOs require blinding nonces from the signer to unblind.
@@ -2218,7 +2246,7 @@ namespace sdk {
             const std::string txhash = tx_details["txhash"];
             const uint32_t tx_block_height = tx_details["block_height"];
 
-            std::map<std::string, amount> received, spent;
+            std::map<std::string, int64_t> totals; /* Note: signed */
             std::map<uint32_t, nlohmann::json> in_map, out_map;
             std::set<std::string> unique_asset_ids;
 
@@ -2237,13 +2265,18 @@ namespace sdk {
 
                     // Compute the effect of the input/output on the wallets balance
                     // TODO: Figure out what redeemable value for social payments is about
-                    const amount::value_type satoshi = ep.at("satoshi");
-
-                    auto& which_balance = is_tx_output ? received[asset_id] : spent[asset_id];
-                    which_balance += satoshi;
+                    const amount satoshi = ep.at("satoshi");
+                    if (is_tx_output) {
+                        totals[asset_id] += satoshi.signed_value();
+                        if (json_get_value(ep, "address").empty()) {
+                            // Add the wallet address for relevant outputs
+                            const auto script = output_script_from_utxo(locker, ep);
+                            ep["address"] = get_address_from_script(m_net_params, script, ep["address_type"]);
+                        }
+                    } else {
+                        totals[asset_id] -= satoshi.signed_value();
+                    }
                 }
-
-                ep["addressee"] = std::string(); // default here, set below where needed
 
                 // Note pt_idx on endpoints is the index within the tx, not the previous tx!
                 const uint32_t pt_idx = ep["pt_idx"];
@@ -2266,85 +2299,71 @@ namespace sdk {
             tx_details["outputs"] = std::move(outputs);
             tx_details.erase("eps");
 
-            GDK_RUNTIME_ASSERT(is_liquid || (unique_asset_ids.size() == 1 && *unique_asset_ids.begin() == "btc"));
+            if (!is_liquid) {
+                GDK_RUNTIME_ASSERT(unique_asset_ids.size() == 1 && *unique_asset_ids.begin() == "btc");
+            }
 
             // TODO: improve the detection of tx type.
-            bool net_positive = false;
-            bool net_positive_set = false;
+            bool seen_positive = false, seen_negative = false;
+
             for (const auto& asset_id : unique_asset_ids) {
-                const auto net_received = received[asset_id];
-                const auto net_spent = spent[asset_id];
-                const auto asset_net_positive = net_received > net_spent;
-                if (net_positive_set) {
-                    GDK_RUNTIME_ASSERT_MSG(net_positive == asset_net_positive, "Ambiguous tx direction");
-                } else {
-                    net_positive = asset_net_positive;
-                    net_positive_set = true;
-                }
-                const amount total = net_positive ? net_received - net_spent : net_spent - net_received;
-                tx_details["satoshi"][asset_id] = total.value();
+                const auto& total = totals[asset_id];
+                seen_positive |= total > 0;
+                seen_negative |= total < 0;
+                tx_details["satoshi"][asset_id] = total;
             }
 
             const bool is_confirmed = tx_block_height != 0;
+            bool can_rbf = false, can_cpfp = false;
 
-            std::vector<std::string> addressees;
+            std::string tx_type;
             if (is_liquid && unique_asset_ids.empty()) {
                 // Failed to unblind all relevant inputs and outputs. This
                 // might be a spam transaction.
-                tx_details["type"] = "not unblindable";
-                tx_details["can_rbf"] = false;
-                tx_details["can_cpfp"] = false;
-            } else if (net_positive) {
+                tx_type = "not unblindable";
+            } else if (seen_positive && seen_negative) {
+                tx_type = "mixed";
+                // FIXME: Allow RBF/CPFP of mixed txs (e.g. swaps)
+            } else if (seen_positive) {
+                tx_type = "incoming";
                 for (auto& ep : tx_details["inputs"]) {
-                    std::string addressee;
                     if (!json_get_value(ep, "is_relevant", false)) {
-                        // Add unique addressees that aren't ourselves
-                        addressee = json_get_value(ep, "social_source");
-                        if (addressee.empty()) {
-                            addressee = json_get_value(ep, "address");
+                        std::string addressee = json_get_value(ep, "social_source");
+                        if (!addressee.empty()) {
+                            ep["addressee"] = std::move(addressee);
                         }
-                        if (std::find(std::begin(addressees), std::end(addressees), addressee)
-                            == std::end(addressees)) {
-                            addressees.emplace_back(addressee);
-                        }
-                        ep["addressee"] = addressee;
+                        ep.erase("social_source");
                     }
                 }
-                tx_details["type"] = "incoming";
-                tx_details["can_rbf"] = false;
-                tx_details["can_cpfp"] = !is_confirmed;
+                can_cpfp = !is_confirmed;
             } else {
+                tx_type = "redeposit";
                 for (auto& ep : tx_details["outputs"]) {
                     if (is_liquid && json_get_value(ep, "script").empty()) {
-                        continue;
+                        continue; // Ignore Liquid fee output
                     }
-                    std::string addressee;
                     if (!json_get_value(ep, "is_relevant", false)) {
-                        // Add unique addressees that aren't ourselves
                         const auto social_destination_p = ep.find("social_destination");
                         if (social_destination_p != ep.end()) {
+                            std::string addressee;
                             if (social_destination_p->is_object()) {
                                 addressee = (*social_destination_p)["name"];
                             } else {
                                 addressee = *social_destination_p;
                             }
-                        } else {
-                            addressee = ep["address"];
+                            if (!addressee.empty()) {
+                                ep["addressee"] = std::move(addressee);
+                            }
+                            ep.erase("social_destination");
                         }
-
-                        if (std::find(std::begin(addressees), std::end(addressees), addressee)
-                            == std::end(addressees)) {
-                            addressees.emplace_back(addressee);
-                        }
-                        ep["addressee"] = addressee;
+                        tx_type = "outgoing"; // We have at least one non-wallet output
                     }
                 }
-                tx_details["type"] = addressees.empty() ? "redeposit" : "outgoing";
-                tx_details["can_rbf"] = !is_confirmed && json_get_value(tx_details, "rbf_optin", false);
-                tx_details["can_cpfp"] = false;
+                can_rbf = !is_confirmed && json_get_value(tx_details, "rbf_optin", false);
             }
-
-            tx_details["addressees"] = addressees;
+            tx_details["type"] = std::move(tx_type);
+            tx_details["can_rbf"] = can_rbf;
+            tx_details["can_cpfp"] = can_cpfp;
 
             if (!sync_disrupted) {
                 // Insert the tx into the DB cache now that it is cleaned up/unblinded
@@ -2465,13 +2484,6 @@ namespace sdk {
         return nlohmann::json(std::move(result));
     }
 
-    amount ga_session::get_dust_threshold() const
-    {
-        locker_t locker(m_mutex);
-        const amount::value_type v = m_login_data.at("dust");
-        return amount(v);
-    }
-
     bool ga_session::encache_blinding_data(const std::string& pubkey_hex, const std::string& script_hex,
         const std::string& nonce_hex, const std::string& blinding_pubkey_hex)
     {
@@ -2510,12 +2522,13 @@ namespace sdk {
         do {
             const nlohmann::json result = get_previous_addresses(details);
             for (auto& address : result.at("list")) {
-                const auto scriptpubkey = scriptpubkey_from_address(m_net_params, address.at("address"), false);
+                const bool allow_unconfidential = true;
+                const auto spk = scriptpubkey_from_address(m_net_params, address.at("address"), allow_unconfidential);
                 const uint32_t branch = json_get_value(address, "branch", 1);
                 const uint32_t pointer = address.at("pointer");
                 const uint32_t subtype = json_get_value(address, "subtype", 0);
                 const uint32_t script_type = address.at("script_type");
-                encache_scriptpubkey_data(scriptpubkey, subaccount, branch, pointer, subtype, script_type);
+                encache_scriptpubkey_data(spk, subaccount, branch, pointer, subtype, script_type);
             }
             if (result.contains("last_pointer")) {
                 details["last_pointer"] = result.at("last_pointer");
@@ -2535,61 +2548,18 @@ namespace sdk {
         return m_cache->get_scriptpubkey_data(scriptpubkey);
     }
 
-    nlohmann::json ga_session::psbt_get_details(const nlohmann::json& details)
-    {
-        const bool is_liquid = m_net_params.is_liquid();
-        const std::string tx_hex = psbt_extract_tx(details.at("psbt"));
-        const auto flags = tx_flags(is_liquid);
-        wally_tx_ptr tx = tx_from_hex(tx_hex, flags);
-
-        nlohmann::json::array_t inputs;
-        inputs.reserve(tx->num_inputs);
-        for (size_t i = 0; i < tx->num_inputs; ++i) {
-            const std::string txhash_hex = b2h_rev(tx->inputs[i].txhash);
-            const uint32_t vout = tx->inputs[i].index;
-            for (const auto& utxo : details.at("utxos")) {
-                if (utxo.value("txhash", std::string()) == txhash_hex && utxo.at("pt_idx") == vout) {
-                    inputs.emplace_back(std::move(utxo));
-                    break;
-                }
-            }
-        }
-
-        nlohmann::json::array_t outputs;
-        outputs.reserve(tx->num_outputs);
-        for (size_t i = 0; i < tx->num_outputs; ++i) {
-            const auto& o = tx->outputs[i];
-            if (!o.script_len) {
-                continue; // Liquid fee
-            }
-            const auto scriptpubkey = gsl::make_span(o.script, o.script_len);
-            auto output_data = get_scriptpubkey_data(scriptpubkey);
-            if (output_data.empty()) {
-                continue; // Scriptpubkey does not belong the wallet
-            }
-            if (is_liquid) {
-                const auto unblinded = unblind_output(*this, tx, i);
-                if (unblinded.contains("error")) {
-                    GDK_LOG_SEV(log_level::warning) << "output " << i << ": " << unblinded.at("error");
-                    continue; // Failed to unblind
-                }
-                output_data.update(unblinded);
-            }
-            outputs.emplace_back(output_data);
-        }
-
-        return nlohmann::json{ { "inputs", std::move(inputs) }, { "outputs", std::move(outputs) } };
-    }
-
     nlohmann::json ga_session::get_unspent_outputs(const nlohmann::json& details, unique_pubkeys_and_scripts_t& missing)
     {
         const uint32_t subaccount = details.at("subaccount");
         const uint32_t num_confs = details.at("num_confs");
         const bool all_coins = json_get_value(details, "all_coins", false);
+        bool old_watch_only = false;
 
         auto utxos
             = wamp_cast_json(m_wamp->call("txs.get_all_unspent_outputs", num_confs, subaccount, "any", all_coins));
+
         locker_t locker(m_mutex);
+        old_watch_only = m_watch_only && !m_blob_aes_key.has_value();
         if (cleanup_utxos(locker, utxos, std::string(), missing)) {
             m_cache->save_db(); // Cache was updated; save it
         }
@@ -2625,6 +2595,13 @@ namespace sdk {
                 }
             }
         }
+        if (!old_watch_only) {
+            // Old (non client blob) watch only sessions cannot generate prevout_script
+            for (auto& utxo : utxos) {
+                if (!utxo.contains("prevout_script"))
+                    utxo["prevout_script"] = b2h(output_script_from_utxo(locker, utxo));
+            }
+        }
         return utxos;
     }
 
@@ -2650,26 +2627,6 @@ namespace sdk {
                 asset_utxos[utxo_asset_id].emplace_back(utxo);
             }
         }
-
-        // Sort the UTXOs such that the oldest are first, with the default
-        // UTXO selection strategy this reduces the number of re-deposits
-        // users have to do by recycling UTXOs that are closer to expiry.
-        // This also reduces the chance of spending unconfirmed outputs by
-        // pushing them to the end of the selection array.
-        std::for_each(std::begin(asset_utxos), std::end(asset_utxos), [](nlohmann::json& utxos) {
-            std::sort(std::begin(utxos), std::end(utxos), [](const nlohmann::json& lhs, const nlohmann::json& rhs) {
-                const uint32_t lbh = lhs["block_height"];
-                const uint32_t rbh = rhs["block_height"];
-                if (lbh == 0) {
-                    return false;
-                }
-                if (rbh == 0) {
-                    return true;
-                }
-                return lbh < rbh;
-            });
-        });
-
         utxos.swap(asset_utxos);
     }
 
@@ -2726,8 +2683,8 @@ namespace sdk {
             locker_t locker(m_mutex);
             // First, try the local cache
             m_cache->get_transaction_data(txhash_hex, { [&tx, flags](const auto& db_blob) {
-                if (db_blob) {
-                    tx = tx_from_bin(db_blob.get(), flags);
+                if (db_blob.has_value()) {
+                    tx = tx_from_bin(db_blob.value(), flags);
                 }
             } });
             if (tx) {
@@ -2777,7 +2734,7 @@ namespace sdk {
         {
             locker_t locker(m_mutex);
             // Old (non client blob) watch only sessions cannot validate addrs
-            old_watch_only = m_watch_only && m_blob_aes_key == boost::none;
+            old_watch_only = m_watch_only && !m_blob_aes_key.has_value();
             csv_blocks = m_csv_blocks;
             csv_buckets = is_historic ? m_csv_buckets : std::vector<uint32_t>();
         }
@@ -2808,8 +2765,6 @@ namespace sdk {
             GDK_RUNTIME_ASSERT(address["address"] == server_address);
         }
 
-        address["user_path"] = get_subaccount_full_path(address["subaccount"], address["pointer"], false);
-
         if (addr_type == address_type::csv) {
             // Make sure the csv value used is in our csv buckets. If isn't,
             // coins held in such scripts may not be recoverable.
@@ -2833,8 +2788,11 @@ namespace sdk {
                 || addr_script_type == script_type::ga_p2sh_p2wsh_fortified_out);
 
             address["blinding_script"] = b2h(scriptpubkey_p2sh_p2wsh_from_bytes(server_script));
-            // The blinding key will be added later once fetched from the sessions signer
+            // Mark the address as non-confidential. It will be converted to
+            // a confidential address later by asking the sessions signer to do so.
+            address["is_confidential"] = false;
         }
+        utxo_add_paths(*this, address);
     }
 
     nlohmann::json ga_session::get_previous_addresses(const nlohmann::json& details)
@@ -3215,6 +3173,13 @@ namespace sdk {
     }
 
     // Idempotent
+    nlohmann::json ga_session::decrypt_with_pin(const nlohmann::json& details)
+    {
+        constexpr bool is_login = false;
+        return decrypt_with_pin_impl(details, is_login);
+    }
+
+    // Idempotent
     void ga_session::disable_all_pin_logins()
     {
         ensure_full_session();
@@ -3301,86 +3266,6 @@ namespace sdk {
             { get_ga_pubkeys().derive(subaccount, pointer), get_user_pubkeys().derive(subaccount, pointer) });
     }
 
-    nlohmann::json ga_session::create_transaction(const nlohmann::json& details)
-    {
-        try {
-            return create_ga_transaction(*this, details);
-        } catch (const user_error& e) {
-            return nlohmann::json({ { "error", e.what() } });
-        }
-    }
-
-    nlohmann::json ga_session::user_sign_transaction(const nlohmann::json& details)
-    {
-        return sign_ga_transaction(*this, details);
-    }
-
-    nlohmann::json ga_session::psbt_sign(const nlohmann::json& details)
-    {
-        nlohmann::json result = details;
-        std::string tx_hex = psbt_extract_tx(details.at("psbt"));
-        const auto flags = tx_flags(m_net_params.is_liquid());
-        wally_tx_ptr tx = tx_from_hex(tx_hex, flags);
-        const nlohmann::json tx_details = { { "transaction", std::move(tx_hex) } };
-
-        // Clear utxos and fill it with the ones that will be signed
-        std::vector<nlohmann::json> inputs;
-        inputs.reserve(tx->num_inputs);
-        bool requires_signatures = false;
-        for (size_t i = 0; i < tx->num_inputs; ++i) {
-            const std::string txhash_hex = b2h_rev(tx->inputs[i].txhash);
-            const uint32_t vout = tx->inputs[i].index;
-            auto input_utxo = nlohmann::json::object();
-            for (auto& utxo : result.at("utxos")) {
-                if (!utxo.empty() && utxo.at("txhash") == txhash_hex && utxo.at("pt_idx") == vout) {
-                    // TODO: remove this once get_unspent_outputs populates prevout_script
-                    utxo["prevout_script"] = b2h(output_script_from_utxo(utxo));
-                    input_utxo = std::move(utxo);
-                    requires_signatures = true;
-                    break;
-                }
-            }
-            inputs.emplace_back(input_utxo);
-        }
-
-        result["utxos"].clear();
-        if (!requires_signatures) {
-            return result;
-        }
-
-        // FIXME: refactor to use HWW path
-        const auto signatures = sign_ga_transaction(*this, tx_details, inputs).first;
-
-        size_t i = 0;
-        const bool is_low_r = get_signer()->supports_low_r();
-        for (const auto& utxo : inputs) {
-            if (!utxo.empty()) {
-                add_input_signature(tx, i, utxo, signatures.at(i), is_low_r);
-            }
-            ++i;
-        }
-
-        // FIXME: handle existing 2FA
-        const nlohmann::json twofactor_data = nlohmann::json::object();
-
-        nlohmann::json private_data;
-        if (result.contains("blinding_nonces")) {
-            private_data["blinding_nonces"] = std::move(result["blinding_nonces"]);
-            result.erase("blinding_nonces");
-        }
-
-        auto ret = wamp_cast_json(m_wamp->call(
-            "vault.sign_raw_tx", tx_to_hex(tx, flags), mp_cast(twofactor_data).get(), mp_cast(private_data).get()));
-
-        result["psbt"] = psbt_merge_tx(details.at("psbt"), ret.at("tx"));
-        for (const auto& utxo : inputs) {
-            if (!utxo.empty()) {
-                result["utxos"].emplace_back(std::move(utxo));
-            }
-        }
-        return result;
-    }
-
     nlohmann::json ga_session::service_sign_transaction(
         const nlohmann::json& details, const nlohmann::json& twofactor_data)
     {
@@ -3398,9 +3283,8 @@ namespace sdk {
         const nlohmann::json& details, const nlohmann::json& twofactor_data, bool is_send)
     {
         GDK_RUNTIME_ASSERT(json_get_value(details, "error").empty());
-        // We must have a tx and it must be signed by the user
+        // We must have a tx, the server will ensure it has been signed by the user
         GDK_RUNTIME_ASSERT(details.find("transaction") != details.end());
-        GDK_RUNTIME_ASSERT_MSG(json_get_value(details, "user_signed", false), "Tx must be signed before sending");
 
         nlohmann::json result = details;
 
@@ -3438,15 +3322,16 @@ namespace sdk {
         const amount::value_type decrease = tx_details.at("limit_decrease");
         const auto txhash_hex = tx_details["txhash"];
         result["txhash"] = txhash_hex;
+        purge_tx_notification(txhash_hex);
+
         // Update the details with the server signed transaction, since it
         // may be a slightly different size once signed
         const auto tx = tx_from_hex(tx_details["tx"], flags);
         update_tx_size_info(m_net_params, tx, result);
-        result["server_signed"] = true;
 
-        std::vector<uint32_t> subaccounts; // TODO: Handle multi-account spends
-        subaccounts.push_back(details.at("subaccount"));
-        remove_cached_utxos(subaccounts);
+        // TODO: get outputs/change subaccounts also, for multi-account spends
+        const auto subaccounts = get_tx_subaccounts(details);
+        remove_cached_utxos({ subaccounts.begin(), subaccounts.end() });
 
         locker_t locker(m_mutex);
         for (auto subaccount : subaccounts) {
@@ -3470,10 +3355,11 @@ namespace sdk {
         return result;
     }
 
-    // Idempotent
     std::string ga_session::broadcast_transaction(const std::string& tx_hex)
     {
-        return wamp_cast(m_wamp->call("vault.broadcast_raw_tx", tx_hex));
+        const auto txhash_hex = wamp_cast(m_wamp->call("vault.broadcast_raw_tx", tx_hex));
+        purge_tx_notification(txhash_hex);
+        return txhash_hex;
     }
 
     nlohmann::json ga_session::create_pset(const nlohmann::json& /*details*/)

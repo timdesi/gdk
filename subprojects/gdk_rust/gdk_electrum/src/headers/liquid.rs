@@ -1,17 +1,18 @@
-use elements::{self, BlockExtData};
+use gdk_common::elements::BlockExtData;
 
 use crate::error::*;
 use crate::headers::compute_merkle_root;
-use bitcoin::hashes::hex::FromHex;
-use bitcoin::hashes::Hash;
-use bitcoin::secp256k1::{Message, Signature};
-use bitcoin::PublicKey;
 use electrum_client::GetMerkleRes;
-use elements::opcodes::{self, Class};
-use elements::script::{self, Instruction};
-use elements::{BlockHash, BlockHeader, Script, TxMerkleNode, Txid};
+use gdk_common::bitcoin::hashes::hex::FromHex;
+use gdk_common::bitcoin::hashes::Hash;
+use gdk_common::bitcoin::secp256k1::{ecdsa::Signature, Message};
+use gdk_common::bitcoin::PublicKey;
+use gdk_common::electrum_client;
+use gdk_common::elements::opcodes::{self, Class, ClassifyContext};
+use gdk_common::elements::script::{self, Instruction};
+use gdk_common::elements::{BlockHash, BlockHeader, Script, TxMerkleNode, Txid};
+use gdk_common::log::info;
 use gdk_common::ElementsNetwork;
-use log::info;
 
 /// liquid v1 block header verifier, not suitable for dynafed
 /// checks the challenge is exactly equal to the one present in block 1
@@ -111,7 +112,7 @@ impl Verifier {
         hash: &BlockHash,
         stack: &mut Vec<Vec<u8>>,
     ) -> Result<(), Error> {
-        if let Class::PushNum(val) = op.classify() {
+        if let Class::PushNum(val) = op.classify(ClassifyContext::Legacy) {
             return Ok(stack.push(vec![val as u8]));
         } else if *op == opcodes::all::OP_CHECKMULTISIG {
             let total_pubkeys = stack.pop().ok_or_else(|| Error::InvalidHeaders)?[0] as usize;
@@ -135,7 +136,7 @@ impl Verifier {
             for signature in signatures.iter() {
                 for pubkey in pubkeys[pubkey_index..].iter() {
                     pubkey_index += 1;
-                    if crate::EC.verify(&msg, signature, &pubkey.key).is_ok() {
+                    if crate::EC.verify_ecdsa(&msg, signature, &pubkey.inner).is_ok() {
                         verified += 1;
                         break;
                     }
@@ -154,11 +155,11 @@ impl Verifier {
 #[cfg(test)]
 mod test {
     use crate::headers::liquid::Verifier;
-    use bitcoin::hashes::hex::FromHex;
-    use elements::encode::deserialize;
-    use elements::{BlockExtData, BlockHeader, Script};
+    use gdk_common::bitcoin::hashes::hex::FromHex;
+    use gdk_common::elements::encode::deserialize;
+    use gdk_common::elements::{BlockExtData, BlockHeader, Script};
+    use gdk_common::rand::seq::SliceRandom;
     use gdk_common::ElementsNetwork;
-    use rand::seq::SliceRandom;
 
     #[test]
     fn test_regtest() {
@@ -213,7 +214,7 @@ mod test {
             assert!(false);
         }
 
-        let mut rng = rand::thread_rng();
+        let mut rng = gdk_common::rand::thread_rng();
 
         let mut wrong_header = block_header.clone();
         if let BlockExtData::Proof {

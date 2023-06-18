@@ -1,29 +1,32 @@
 use crate::error::*;
 use crate::headers::compute_merkle_root;
 use crate::spv::calc_difficulty_retarget;
-use bitcoin::blockdata::constants::{genesis_block, DIFFCHANGE_INTERVAL, TARGET_BLOCK_SPACING};
-use bitcoin::consensus::{deserialize, serialize};
-use bitcoin::hashes::hex::FromHex;
-use bitcoin::{BlockHash, Txid};
-use bitcoin::{BlockHeader, Network};
 use electrum_client::GetMerkleRes;
-use log::{info, warn};
+use gdk_common::bitcoin::blockdata::constants::{
+    genesis_block, DIFFCHANGE_INTERVAL, TARGET_BLOCK_SPACING,
+};
+use gdk_common::bitcoin::consensus::{deserialize, serialize};
+use gdk_common::bitcoin::hashes::hex::FromHex;
+use gdk_common::bitcoin::{BlockHash, Txid};
+use gdk_common::bitcoin::{BlockHeader, Network};
+use gdk_common::electrum_client;
+use gdk_common::log::{info, warn};
+use gdk_common::once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-lazy_static! {
-    pub static ref HEADERS_FILE_MUTEX: HashMap<Network, Mutex<()>> = {
-        let mut m = HashMap::new();
-        m.insert(Network::Bitcoin, Mutex::new(()));
-        m.insert(Network::Testnet, Mutex::new(()));
-        m.insert(Network::Regtest, Mutex::new(()));
-        m.insert(Network::Signet, Mutex::new(()));  // unused
-        m
-    };
-}
+pub static HEADERS_FILE_MUTEX: Lazy<HashMap<Network, Mutex<()>>> = Lazy::new(|| {
+    HashMap::from_iter([
+        (Network::Bitcoin, Mutex::new(())),
+        (Network::Testnet, Mutex::new(())),
+        (Network::Regtest, Mutex::new(())),
+        (Network::Signet, Mutex::new(())), // unused
+    ])
+});
 
 #[derive(Debug)]
 pub struct HeadersChain {
@@ -269,11 +272,11 @@ fn get_checkpoints(network: Network) -> HashMap<u32, BlockHash> {
 #[cfg(test)]
 mod test {
     use crate::headers::bitcoin::HeadersChain;
-    use bitcoin::consensus::encode::Decodable;
-    use bitcoin::hash_types::BlockHash;
-    use bitcoin::hashes::hex::FromHex;
-    use bitcoin::{BlockHeader, Network};
-    use electrum_client::GetMerkleRes;
+    use gdk_common::bitcoin::consensus::encode::Decodable;
+    use gdk_common::bitcoin::hash_types::BlockHash;
+    use gdk_common::bitcoin::hashes::hex::FromHex;
+    use gdk_common::bitcoin::{BlockHeader, Network, Txid};
+    use gdk_common::electrum_client::GetMerkleRes;
     use std::io::Cursor;
     use tempfile::TempDir;
 
@@ -301,10 +304,9 @@ mod test {
         );
 
         // first non-coinbase tx
-        let txid = bitcoin::Txid::from_hex(
-            "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16",
-        )
-        .unwrap();
+        let txid =
+            Txid::from_hex("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16")
+                .unwrap();
         let block_height = 170;
         let merkle_tree = GetMerkleRes {
             block_height,
@@ -317,10 +319,9 @@ mod test {
         chain.verify_tx_proof(&txid, block_height as u32, merkle_tree).unwrap();
 
         // test a coinbase,
-        let txid = bitcoin::Txid::from_hex(
-            "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b",
-        )
-        .unwrap();
+        let txid =
+            Txid::from_hex("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+                .unwrap();
         let block_height = 0;
         let merkle_tree = GetMerkleRes {
             block_height: 0,
@@ -340,10 +341,9 @@ mod test {
         );
 
         // first non-coinbase tx, changed first byte of merkle proof
-        let txid = bitcoin::Txid::from_hex(
-            "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16",
-        )
-        .unwrap();
+        let txid =
+            Txid::from_hex("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16")
+                .unwrap();
         let block_height = 170;
         let merkle_tree = GetMerkleRes {
             block_height,
